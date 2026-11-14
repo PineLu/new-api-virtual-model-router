@@ -1,0 +1,14 @@
+{
+  "name": "new-api-virtual-model-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Virtual model group routing for New API Provider Plugin API v1",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check plugin.js && npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
