@@ -6,12 +6,13 @@ export const meta = {
   apiVersion: 1,
   key: "virtual-model-router",
   name: { en: "Virtual Model Router", zh: "虚拟模型路由" },
-  version: "0.1.0",
+  version: "0.1.1",
   author: { name: "PineLu" },
   description: {
     en: "Route one virtual model alias to multiple upstream models on the same provider.",
     zh: "将自定义模型别名按优先级和权重路由到同一提供商的多个真实模型。"
   },
+  models: [], // Frontend channel picker expects an array, not null; aliases live in channel models.
   icon: "text:VR",
   relay: [{
     incoming_path: "/v1/chat/completions",
