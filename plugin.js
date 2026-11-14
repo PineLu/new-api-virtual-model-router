@@ -6,11 +6,11 @@ export const meta = {
   apiVersion: 1,
   key: "virtual-model-router",
   name: { en: "Virtual Model Router", zh: "虚拟模型路由" },
-  version: "0.2.0",
+  version: "0.2.1",
   author: { name: "PineLu" },
   description: {
-    en: "Route one virtual model alias to multiple upstream models on the same provider.",
-    zh: "将自定义模型别名按优先级和权重路由到同一提供商的多个真实模型。"
+    en: "Route virtual model groups and pass through other channel models on the same provider.",
+    zh: "虚拟模型组按优先级和权重路由，其他已配置的真实模型直接透传到当前提供商。"
   },
   models: ["auto-code"], // rc.51 channel picker requires a non-empty model list; P0 advertises one alias.
   icon: "text:VR",
@@ -183,8 +183,10 @@ export function resolveModelGroups(config) {
   if (mode === "json") return config?.groups;
   if (mode !== "table") throw new Error("unknown virtual model editor mode: " + String(mode));
   const routes = config?.routes;
-  if (!Array.isArray(routes) || !routes.length)
-    throw new Error("virtual model routes table must contain at least one row");
+  if (routes === undefined || (Array.isArray(routes) && routes.length === 0))
+    return Object.create(null);
+  if (!Array.isArray(routes))
+    throw new Error("virtual model routes table must be an array");
   const groups = Object.create(null);
   routes.forEach((route, i) => {
     if (!isRecord(route) || typeof route.alias !== "string" || !route.alias.trim())
@@ -200,14 +202,25 @@ export function resolveModelGroups(config) {
   return groups;
 }
 
-/** Rewrites only the upstream JSON model field; never mutates client input. */
+/** Virtual aliases route inside this channel; other selected channel models pass through unchanged. */
 export function convertRequest(ctx, request) {
   const alias = request.model;
   if (!isRecord(request.body))
     throw new Error("Virtual Model Router supports JSON Chat Completions bodies only");
   if (typeof alias !== "string" || request.body.model !== alias)
     throw new Error("Do not configure channel model_mapping for virtual aliases");
-  const models = normalizeGroup(resolveModelGroups(ctx.config), alias);
+  const groups = resolveModelGroups(ctx.config);
+  if (!isRecord(groups) || !hasOwn(groups, alias)) {
+    // New API already selected this channel for the requested model. Preserve
+    // the gateway's channel-model allowlist and its token/group authorization.
+    // Never retry a direct model against unrelated virtual-group candidates.
+    return {
+      body: { ...request.body }, path: ENDPOINT,
+      stream: request.stream === true, nativeResponse: true,
+      state: { direct: true, alias, attempted: [alias], maxRetries: 0 }
+    };
+  }
+  const models = normalizeGroup(groups, alias);
   const chosen = chooseModel(models);
   if (chosen === null) throw new Error("virtual model " + alias + ": no eligible candidates");
   const body = { ...request.body, model: chosen.name };
