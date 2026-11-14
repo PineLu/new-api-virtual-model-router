@@ -35,3 +35,11 @@
 - Test results come from actual `/v1/chat/completions` calls through New API, not only direct mock requests.
 - The temporary mock intentionally returns 429 for `mock-a` when the message contains the test marker `vmr-fallback`; this tests pre-output fallback to `mock-b`.
 - This is a **P0 integration proof**, not a production readiness certification.
+
+## Cleanup and handoff
+
+- The temporary `vmr-p0-temp-20261114` API token was **disabled**, remains set to expire approximately one hour after creation, and its local plaintext copy was deleted. It was not deleted from the New API UI.
+- Test channel `#13 VMR P0 Mock Test` was **disabled**, retained only as a reversible configuration example.
+- The `vmr-mock` Podman container was stopped and removed (`--rm`). The existing New API container remained running and its `/api/status` endpoint returned HTTP 200.
+- Provider Plugin `virtual-model-router` `v0.1.2` stays **installed and activated**; no real-provider channel credentials or existing production channels were changed.
+- Exact per-target billing remains unvalidated. The `auto-code` alias currently has no configured price in the test environment, so consumption rows show USD 0.
