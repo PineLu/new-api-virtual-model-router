@@ -6,7 +6,7 @@ export const meta = {
   apiVersion: 1,
   key: "virtual-model-router",
   name: { en: "Virtual Model Router", zh: "虚拟模型路由" },
-  version: "0.1.2",
+  version: "0.2.0",
   author: { name: "PineLu" },
   description: {
     en: "Route one virtual model alias to multiple upstream models on the same provider.",
@@ -22,14 +22,67 @@ export const meta = {
   channelConfig: {
     type: "object",
     properties: {
+      editorMode: {
+        type: "string",
+        title: { en: "Configuration editor", zh: "配置方式" },
+        description: {
+          en: "Use the table for simple routing or JSON for advanced groups; switching does not auto-convert values.",
+          zh: "简单路由选表格，高级配置选 JSON；切换不会自动转换两种格式的数据。"
+        },
+        enum: ["json", "table"],
+        enumTitles: [
+          { en: "JSON (existing configuration)", zh: "JSON（兼容旧配置）" },
+          { en: "Visual table", zh: "可视化表格" }
+        ],
+        default: "json"
+      },
+      routes: {
+        type: "array",
+        title: { en: "Virtual model routes (table)", zh: "虚拟模型路由表" },
+        description: {
+          en: "One row per upstream model. Equal priority uses weights; weight 0 disables a target. Only used in table mode.",
+          zh: "每个上游模型一行。同优先级按权重分流；权重为 0 表示禁用。仅表格模式生效。"
+        },
+        visibleWhen: { editorMode: ["table"] },
+        items: {
+          type: "object",
+          title: { en: "Model route", zh: "模型路由" },
+          properties: {
+            alias: {
+              type: "string",
+              title: { en: "Virtual model", zh: "虚拟模型" }
+            },
+            name: {
+              type: "string",
+              title: { en: "Upstream model", zh: "上游模型" }
+            },
+            priority: {
+              type: "integer",
+              title: { en: "Priority", zh: "优先级" },
+              default: 0,
+              minimum: -10000,
+              maximum: 10000
+            },
+            weight: {
+              type: "integer",
+              title: { en: "Weight", zh: "权重" },
+              default: 1,
+              minimum: 0,
+              maximum: 100000
+            }
+          },
+          required: ["alias", "name"]
+        }
+      },
       groups: {
         type: "object",
         format: "json",
         title: { en: "Virtual model groups (JSON)", zh: "虚拟模型组（JSON）" },
         description: {
           en: "Object keyed by public aliases; each group has a models array.",
-          zh: "以对外模型别名为键，每个模型组包含 models 数组。"
-        }
+          zh: "以对外模型别名为键，每个模型组包含 models 数组；仅 JSON 模式生效。"
+        },
+        visibleWhen: { editorMode: ["json"] }
       },
       maxRetries: {
         type: "integer",
@@ -41,8 +94,7 @@ export const meta = {
         title: { en: "Maximum replay body bytes", zh: "允许重放的最大请求字节数" },
         minimum: 0, maximum: 65536, default: 32768
       }
-    },
-    required: ["groups"]
+    }
   }
 };
 
@@ -125,6 +177,29 @@ function upstreamReply(response) {
   }};
 }
 
+/** Convert flat visual-table rows to the existing grouped model representation. */
+export function resolveModelGroups(config) {
+  const mode = config?.editorMode ?? "json";
+  if (mode === "json") return config?.groups;
+  if (mode !== "table") throw new Error("unknown virtual model editor mode: " + String(mode));
+  const routes = config?.routes;
+  if (!Array.isArray(routes) || !routes.length)
+    throw new Error("virtual model routes table must contain at least one row");
+  const groups = Object.create(null);
+  routes.forEach((route, i) => {
+    if (!isRecord(route) || typeof route.alias !== "string" || !route.alias.trim())
+      throw new Error("virtual model routes[" + i + "].alias must be non-empty");
+    const alias = route.alias.trim();
+    if (!hasOwn(groups, alias)) groups[alias] = { models: [] };
+    groups[alias].models.push({
+      name: route.name,
+      priority: route.priority,
+      weight: route.weight
+    });
+  });
+  return groups;
+}
+
 /** Rewrites only the upstream JSON model field; never mutates client input. */
 export function convertRequest(ctx, request) {
   const alias = request.model;
@@ -132,7 +207,7 @@ export function convertRequest(ctx, request) {
     throw new Error("Virtual Model Router supports JSON Chat Completions bodies only");
   if (typeof alias !== "string" || request.body.model !== alias)
     throw new Error("Do not configure channel model_mapping for virtual aliases");
-  const models = normalizeGroup(ctx.config?.groups, alias);
+  const models = normalizeGroup(resolveModelGroups(ctx.config), alias);
   const chosen = chooseModel(models);
   if (chosen === null) throw new Error("virtual model " + alias + ": no eligible candidates");
   const body = { ...request.body, model: chosen.name };
