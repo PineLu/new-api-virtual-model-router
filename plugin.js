@@ -6,19 +6,36 @@ export const meta = {
   apiVersion: 1,
   key: "virtual-model-router",
   name: { en: "Virtual Model Router", zh: "虚拟模型路由" },
-  version: "0.2.1",
+  version: "0.3.0",
   author: { name: "PineLu" },
   description: {
-    en: "Route virtual model groups and pass through other channel models on the same provider.",
-    zh: "虚拟模型组按优先级和权重路由，其他已配置的真实模型直接透传到当前提供商。"
+    en: "Route virtual model groups and pass through real models across Chat, Responses and Anthropic Messages using New API protocol converters.",
+    zh: "通过 New API 协议转换器，为 Chat、Responses 和 Anthropic Messages 提供统一的虚拟模型路由及真实模型直通。"
   },
   models: ["auto-code"], // rc.51 channel picker requires a non-empty model list; P0 advertises one alias.
   icon: "text:VR",
-  relay: [{
-    incoming_path: "/v1/chat/completions",
-    upstream_path: "/v1/chat/completions",
-    converter: "plugin"
-  }],
+  relay: [
+    // OpenAI Chat Completions is the router's canonical internal format.
+    {
+      incoming_path: "/v1/chat/completions",
+      upstream_path: "/v1/chat/completions",
+      converter: "plugin"
+    },
+    // New API RelayKit converts Anthropic Messages to Chat before routing,
+    // then converts the upstream Chat response/stream back to Anthropic.
+    {
+      incoming_path: "/v1/messages",
+      upstream_path: "/v1/chat/completions",
+      converter: "anthropic_messages_to_openai_chat_completions+plugin"
+    },
+    // New API RelayKit converts Responses to Chat before routing and converts
+    // the upstream Chat response/stream back to the original Responses format.
+    {
+      incoming_path: "/v1/responses",
+      upstream_path: "/v1/chat/completions",
+      converter: "openai_responses_to_openai_chat_completions+plugin"
+    }
+  ],
   channelConfig: {
     type: "object",
     properties: {
@@ -98,7 +115,7 @@ export const meta = {
   }
 };
 
-const ENDPOINT = "/v1/chat/completions";
+const UPSTREAM_ENDPOINT = "/v1/chat/completions";
 const FALLBACK_STATUSES = [429, 502, 503, 504];
 const isRecord = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const hasOwn = (v, key) => Object.prototype.hasOwnProperty.call(v, key);
@@ -215,7 +232,7 @@ export function convertRequest(ctx, request) {
     // the gateway's channel-model allowlist and its token/group authorization.
     // Never retry a direct model against unrelated virtual-group candidates.
     return {
-      body: { ...request.body }, path: ENDPOINT,
+      body: { ...request.body }, path: UPSTREAM_ENDPOINT,
       stream: request.stream === true, nativeResponse: true,
       state: { direct: true, alias, attempted: [alias], maxRetries: 0 }
     };
@@ -229,7 +246,7 @@ export function convertRequest(ctx, request) {
   const replayBody = maxRetries > 0 && utf8Length(JSON.stringify(body), maxReplayBytes) <= maxReplayBytes
     ? body : null;
   return {
-    body, path: ENDPOINT, stream: request.stream === true, nativeResponse: true,
+    body, path: UPSTREAM_ENDPOINT, stream: request.stream === true, nativeResponse: true,
     state: {
       alias, models, attempted: [chosen.name], maxRetries,
       stream: request.stream === true, replayBody
@@ -247,7 +264,7 @@ export function convertResponse(ctx, response) {
     const chosen = chooseModel(state.models, state.attempted);
     if (chosen !== null) return {
       next: {
-        path: ENDPOINT, body: { ...state.replayBody, model: chosen.name },
+        path: UPSTREAM_ENDPOINT, body: { ...state.replayBody, model: chosen.name },
         stream: state.stream, nativeResponse: true
       },
       state: { ...state, attempted: [...state.attempted, chosen.name] }

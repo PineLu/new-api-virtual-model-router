@@ -1,10 +1,23 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.2.1
+version: 0.3.0
 locale: zh-CN
 ---
 # Changelog
+
+## [0.3.0]
+
+### Added
+
+- 新增 Anthropic Messages 与 OpenAI Responses 入口，使用 New API RelayKit 内置的 +plugin 协议转换器。
+- 三种客户端协议统一进入 OpenAI Chat 路由核心；协议转换不由插件重复实现。
+- 保留既有 Chat 路由、权重选择、有限故障切换和真实模型直通行为。
+
+### Compatibility
+
+- 需要支持 <converter>+plugin 链式 RelayKit 转换的 New API Provider Plugin API，当前目标版本为 v1.0.0-rc.51。
+- Anthropic / Responses 的协议特有能力仍取决于 RelayKit 的转换覆盖范围，必须进行实机集成验证。
 
 ## [0.2.1]
 

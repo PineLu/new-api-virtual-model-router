@@ -27,11 +27,27 @@ const req = (stream = false) => ({
   }
 });
 
-test("manifest exposes the Chat Completions provider route", () => {
+test("manifest exposes Chat, Anthropic Messages and Responses routes through Chat", () => {
   assert.equal(meta.apiVersion, 1);
+  assert.equal(meta.version, "0.3.0");
   assert.deepEqual(meta.models, ["auto-code"]); // rc.51 channel picker expects a non-empty models array
-  assert.equal(meta.relay.length, 1);
-  assert.equal(meta.relay[0].converter, "plugin");
+  assert.deepEqual(meta.relay, [
+    {
+      incoming_path: "/v1/chat/completions",
+      upstream_path: "/v1/chat/completions",
+      converter: "plugin"
+    },
+    {
+      incoming_path: "/v1/messages",
+      upstream_path: "/v1/chat/completions",
+      converter: "anthropic_messages_to_openai_chat_completions+plugin"
+    },
+    {
+      incoming_path: "/v1/responses",
+      upstream_path: "/v1/chat/completions",
+      converter: "openai_responses_to_openai_chat_completions+plugin"
+    }
+  ]);
   assert.equal(meta.channelConfig.properties.editorMode.default, "json");
   const rows = meta.channelConfig.properties.routes;
   assert.equal(rows.type, "array");
@@ -39,6 +55,33 @@ test("manifest exposes the Chat Completions provider route", () => {
   assert.deepEqual(rows.visibleWhen.editorMode, ["table"]);
   assert.deepEqual(meta.channelConfig.properties.groups.visibleWhen.editorMode, ["json"]);
 });
+test("all client protocols share the same canonical Chat routing core", () => {
+  const singleTarget = { "auto-code": { models: [{ name: "model-only" }] } };
+  for (const path of ["/v1/chat/completions", "/v1/messages", "/v1/responses"]) {
+    const request = req(true);
+    const result = convertRequest({ ...ctx({ groups: singleTarget }), path }, request);
+    assert.equal(result.path, "/v1/chat/completions", path);
+    assert.equal(result.body.model, "model-only", path);
+    assert.equal(result.body.messages[0].content, "hello", path);
+    assert.equal(result.stream, true, path);
+    assert.equal(result.nativeResponse, true, path);
+    assert.equal(result.state.alias, "auto-code", path);
+  }
+});
+
+test("direct real-model passthrough is shared across all client routes", () => {
+  for (const path of ["/v1/chat/completions", "/v1/messages", "/v1/responses"]) {
+    const request = req(false);
+    request.model = "openrouter/free";
+    request.body.model = "openrouter/free";
+    const result = convertRequest({ ...ctx(), path }, request);
+    assert.equal(result.path, "/v1/chat/completions", path);
+    assert.equal(result.body.model, "openrouter/free", path);
+    assert.equal(result.state.direct, true, path);
+    assert.equal(result.state.maxRetries, 0, path);
+  }
+});
+
 test("validates alias, duplicates, cycles and positive traffic", () => {
   assert.equal(normalizeGroup(groups, "auto-code").length, 3);
   assert.throws(() => normalizeGroup(groups, "missing"), /not configured/);

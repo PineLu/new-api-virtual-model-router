@@ -2,13 +2,13 @@
 
 [English](README.md)
 
-**当前阶段：P0 集成验证已通过（New API rc.51 + 本地模拟上游），尚未验证真实提供商与差异化计费，暂不建议用于生产。**
+**当前阶段：v0.3.0 增加多协议入口，22 项单元测试通过。Anthropic / Responses 路由尚待 New API rc.51 实机验证；真实提供商稳定性和差异化计费尚未验证，暂不视为生产就绪。**
 
 ## 做什么
 
 客户端只填写虚拟模型名（例如 `auto-code`）；插件从**同一个提供商、同一 Base URL、同一 API Key**下的多个真实模型中选择一个调用。
 
-插件支持虚拟模型组以及当前渠道已启用真实模型的直接透传；V1 清单默认公布 `auto-code`，内部支持多个真实模型；提供优先级 + 权重、HTTP 429/502/503/504 失败后的有限降级、Chat Completions 的 JSON 和 SSE 原生透传。**不做**智能任务分类、跨渠道/跨提供商、状态熔断、成本智能路由或其他复杂策略。
+插件支持虚拟模型组以及当前渠道已启用真实模型的直接透传；清单默认公布 `auto-code`，内部支持多个真实模型；提供优先级 + 权重、HTTP 429/502/503/504 失败后的有限降级。v0.3.0 增加 Chat Completions、Anthropic Messages、OpenAI Responses 三种客户端入口，统一由 New API RelayKit 转换为 Chat Completions，再进入同一套路由核心。**不做**协议编解码、智能任务分类、跨渠道/跨提供商、状态熔断、成本智能路由或其他复杂策略。
 
 ## 配置方式（不需要 Fork New API）
 
@@ -23,16 +23,37 @@
 
 ## 安装（需实际网关验证）
 
-1. 确保 New API 版本支持 Provider Plugin（建议 v1.0.0-rc.50 或更新）。
+1. 确保 New API 为 v1.0.0-rc.51 或更新版本；v0.3.0 需要链式 RelayKit 转换器支持。
 2. 在插件管理上传仓库中的 `plugin.js`。
 3. 新建 **61 / Task Plugin** 渠道并绑定 `virtual-model-router`。
 4. 渠道 Base URL 与 API Key 填写目标上游提供商信息。
 5. 渠道模型列表加入 `auto-code`，**不要对别名额外配置 `model_mapping`**。
 6. 在插件设置中选择表格或 JSON。表格配置见 [示例](examples/table-config.json)；旧版 JSON 配置继续使用 [groups 示例](examples/channel-config.json)。重试次数默认 1 次；最大允许重放请求大小默认 32768 字节。
 7. 在 New API 中独立配置虚拟模型的售价。**插件不会按照实际选中的真实模型自动调整扣费。**
-8. P0 的 `meta.models` 目前只公布 `auto-code`；新增对外别名需要更新插件清单并重新上传，多别名路由尚未完成实机验证。
+8. 当前插件清单的 `meta.models` 只公布 `auto-code`；新增对外别名需要更新插件清单并重新上传，多别名路由尚未完成实机验证。
 
 将示例中的 `model-a`、`model-b`、`model-c` 换成**同一提供商真正支持的模型名**，不要直接使用占位符调用。
+
+## 多协议路由（v0.3.0）
+
+三个客户端入口最终共用同一个 OpenAI Chat 路由核心：
+
+| 客户端入口 | New API RelayKit 转换器 | 插件收到的格式 |
+|---|---|---|
+| /v1/chat/completions | plugin | OpenAI Chat |
+| /v1/messages | anthropic_messages_to_openai_chat_completions+plugin | OpenAI Chat |
+| /v1/responses | openai_responses_to_openai_chat_completions+plugin | OpenAI Chat |
+
+处理链路：
+
+1. New API RelayKit 将客户端请求转换成 Chat Completions。
+2. Virtual Model Router 只识别虚拟别名、选择上游模型、执行有限故障切换或真实模型直通。
+3. 上游统一调用 /v1/chat/completions。
+4. 上游 Chat 响应交回 RelayKit，转换为客户端原始协议。
+
+协议转换完全复用 New API 内置能力，插件不维护 Anthropic / Responses 的编解码实现。协议特有字段和语义能否保留，取决于当前 New API 转换器的兼容程度；Thinking / Reasoning、工具调用、多轮上下文和流式输出必须在目标版本与客户端上实测。
+
+详细设计与验证清单：[多协议路由设计](docs/multi-protocol-routing.md)。
 
 ## 真实模型直通
 
@@ -62,9 +83,10 @@ npm test
 
 - 不接管 New API 现有渠道调度；只在本插件绑定的单一渠道内部选择真实模型。
 - 不复用其他渠道的密钥，也不保证真实模型级准确计费。
-- 成功的 OpenAI Chat Completions JSON/SSE 使用 `nativeResponse` 透传，因此响应中可能直接出现真实模型名。
-- 不支持 Responses API、Claude Messages、WebSocket 等接口（后续版本可评估）。
-- 运行时插件 API 行为以 [官方规范](https://github.com/QuantumNous/new-api/blob/main/docs/plugin-api/v1.md) 为依据，真实环境仍需验证。
+- Chat、Anthropic Messages、Responses 是 v0.3.0 当前覆盖的入口；Gemini、WebSocket 等接口暂不在范围内。
+- 成功的上游 Chat JSON/SSE 通过 `nativeResponse` 交回 New API，由 RelayKit 转回客户端协议；响应中可能显示实际选中的真实模型名。
+- 协议转换不保证所有厂商扩展字段无损；以实际 New API 版本的转换器能力为准。
+- 运行时插件 API 行为以 [New API rc.51 插件规范](https://github.com/QuantumNous/new-api/blob/v1.0.0-rc.51/docs/plugin-api/v1.md) 为依据，真实环境仍需验证。
 
 [New API 全局模型别名需求 #3001](https://github.com/QuantumNous/new-api/issues/3001)。
 

@@ -1,12 +1,25 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.2.1
+version: 0.3.0
 locale: en
 translations:
   zh-CN: CHANGELOG.zh-CN.md
 ---
 # Changelog
+
+## [0.3.0]
+
+### Added
+
+- Add Anthropic Messages and OpenAI Responses client routes using New API RelayKit's built-in +plugin converters.
+- Normalize all supported client protocols to the same OpenAI Chat routing core; keep protocol conversion outside the plugin.
+- Preserve existing Chat routing, weighted selection, bounded fallback and real-model passthrough.
+
+### Compatibility
+
+- Requires a New API build whose Provider Plugin API supports chained RelayKit converters (<converter>+plugin), such as v1.0.0-rc.51.
+- Anthropic/Responses protocol-specific behavior still depends on RelayKit conversion coverage and requires live integration validation.
 
 ## [0.2.1]
 
