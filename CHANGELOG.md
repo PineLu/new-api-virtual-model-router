@@ -1,12 +1,24 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.3.5
+version: 0.3.6
 locale: en
 translations:
   zh-CN: CHANGELOG.zh-CN.md
 ---
 # Changelog
+
+## [0.3.6]
+
+### Changed
+
+- The table (`routes`) and JSON (`groups`) editors now share one routing table: the active mode's own field wins, and when it is empty the other representation is used. Maintaining a single side is enough, and switching editors no longer disables routing.
+- Schema descriptions state this fallback explicitly.
+- 4 new unit tests: table→JSON and JSON→table fallback, active-mode precedence, and the non-array `routes` error.
+
+### Compatibility
+
+- No configuration change is required. Channels that keep both fields behave as before; a channel with only one populated side now works in both modes instead of failing in the other.
 
 ## [0.3.5]
 

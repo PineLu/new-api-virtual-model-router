@@ -29,7 +29,7 @@ const req = (stream = false) => ({
 
 test("manifest exposes Chat, Anthropic Messages and Responses routes through Chat", () => {
   assert.equal(meta.apiVersion, 1);
-  assert.equal(meta.version, "0.3.5");
+  assert.equal(meta.version, "0.3.6");
   assert.deepEqual(meta.models, ["auto-code"]); // rc.51 channel picker expects a non-empty models array
   assert.deepEqual(meta.relay, [
     {
@@ -513,4 +513,33 @@ test("direct passthrough is unaffected by the new fallback options", () => {
   assert.equal(out.next, undefined);
   assert.equal(out.body.error.message, "no quota");
   assert.equal(out.body.error.vmr_fallback, undefined);
+});
+
+test("table mode falls back to JSON groups when the table is empty", () => {
+  const groups = resolveModelGroups({
+    editorMode: "table", routes: [],
+    groups: { "fb-alias": { models: [{ name: "m-json", priority: 3, weight: 5 }] } }
+  });
+  assert.deepEqual(Object.keys(groups), ["fb-alias"]);
+  assert.equal(groups["fb-alias"].models[0].name, "m-json");
+});
+
+test("json mode falls back to table routes when groups is empty", () => {
+  const groups = resolveModelGroups({
+    editorMode: "json", groups: {},
+    routes: [{ alias: "fb-alias", name: "m-table", priority: 10, weight: 1 }]
+  });
+  assert.deepEqual(Object.keys(groups), ["fb-alias"]);
+  assert.equal(groups["fb-alias"].models[0].name, "m-table");
+});
+
+test("the active mode's own field wins when both are populated", () => {
+  const routes = [{ alias: "a", name: "m-table", priority: 10, weight: 1 }];
+  const both = { a: { models: [{ name: "m-json", priority: 10, weight: 1 }] } };
+  assert.equal(resolveModelGroups({ editorMode: "table", routes, groups: both }).a.models[0].name, "m-table");
+  assert.equal(resolveModelGroups({ editorMode: "json", routes, groups: both }).a.models[0].name, "m-json");
+});
+
+test("a non-array routes value still fails loudly in table mode", () => {
+  assert.throws(() => resolveModelGroups({ editorMode: "table", routes: "nope" }), /must be an array/);
 });

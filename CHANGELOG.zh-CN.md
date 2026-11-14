@@ -1,10 +1,22 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.3.5
+version: 0.3.6
 locale: zh-CN
 ---
 # Changelog
+
+## [0.3.6]
+
+### Changed
+
+- 表格（`routes`）与 JSON（`groups`）两种编辑方式现在共用同一份路由：当前模式的配置优先，该侧为空时自动读取另一种格式。只维护一份即可，来回切换不会再导致路由失效。
+- 表单描述已明确说明这一兜底行为。
+- 新增 4 项单元测试：table→JSON 兜底、JSON→table 兜底、当前模式优先、`routes` 非数组时报错。
+
+### Compatibility
+
+- 无需改配置。两份都填的渠道行为不变；只有一侧有数据的渠道，以前在另一种模式下会失效，现在两种模式都能工作。
 
 ## [0.3.5]
 

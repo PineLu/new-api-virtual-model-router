@@ -20,7 +20,7 @@ A lightweight **Provider Plugin API v1** for [New API](https://github.com/Quantu
 
 Plugin 0.2.1 adds a **Visual table** mode under native Plugin settings, with columns for public alias, upstream model, priority, and weight. JSON mode keeps the original `groups` object. Old saved channels without `editorMode` continue to use JSON; existing values are preserved.
 
-**Mode switching is not data conversion:** table and JSON keep separate values; only the selected mode drives routing. New API's native Routing & Mapping tab is not extensible by the current Provider Plugin API.
+**Both editors share one routing table:** the active mode's own field wins, and when it is empty the other format is used, so maintaining a single side is enough and switching editors never disables routing. New API's native Routing & Mapping tab is not extensible by the current Provider Plugin API.
 
 See [editor guide](docs/config-editor-modes.md) and [table config example](examples/table-config.json).
 

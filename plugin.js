@@ -6,7 +6,7 @@ export const meta = {
   apiVersion: 1,
   key: "virtual-model-router",
   name: { en: "Virtual Model Router", zh: "虚拟模型路由" },
-  version: "0.3.5",
+  version: "0.3.6",
   author: { name: "PineLu" },
   description: {
     en: "Route virtual model groups and pass through real models across Chat, Responses and Anthropic Messages using New API protocol converters.",
@@ -43,8 +43,8 @@ export const meta = {
         type: "string",
         title: { en: "Configuration editor", zh: "配置方式" },
         description: {
-          en: "Use the table for simple routing or JSON for advanced groups; switching does not auto-convert values.",
-          zh: "简单路由选表格，高级配置选 JSON；切换不会自动转换两种格式的数据。"
+          en: "Both editors share one routing table: when the active mode's own field is empty, the other format is used automatically.",
+          zh: "两种模式共用同一份路由：当前模式的配置为空时，自动读取另一种格式。"
         },
         enum: ["json", "table"],
         enumTitles: [
@@ -57,8 +57,8 @@ export const meta = {
         type: "array",
         title: { en: "Virtual model routes (table)", zh: "虚拟模型路由表" },
         description: {
-          en: "One row per upstream model. Equal priority uses weights; weight 0 disables a target. Only used in table mode.",
-          zh: "每个上游模型一行。同优先级按权重分流；权重为 0 表示禁用。仅表格模式生效。"
+          en: "One row per upstream model. Equal priority uses weights; weight 0 disables a target. An empty table falls back to the JSON groups.",
+          zh: "每个上游模型一行。同优先级按权重分流；权重为 0 表示禁用。表格为空时自动读取 JSON 配置。"
         },
         visibleWhen: { editorMode: ["table"] },
         items: {
@@ -96,8 +96,8 @@ export const meta = {
         format: "json",
         title: { en: "Virtual model groups (JSON)", zh: "虚拟模型组（JSON）" },
         description: {
-          en: "Object keyed by public aliases; each group has a models array.",
-          zh: "以对外模型别名为键，每个模型组包含 models 数组；仅 JSON 模式生效。"
+          en: "Object keyed by public aliases; each group has a models array. Empty JSON falls back to the table routes.",
+          zh: "以对外模型别名为键，每个模型组包含 models 数组；为空时自动读取表格配置。"
         },
         visibleWhen: { editorMode: ["json"] }
       },
@@ -366,13 +366,8 @@ function upstreamReply(response) {
 }
 
 /** Convert flat visual-table rows to the existing grouped model representation. */
-export function resolveModelGroups(config) {
-  const mode = config?.editorMode ?? "json";
-  if (mode === "json") return config?.groups;
-  if (mode !== "table") throw new Error("unknown virtual model editor mode: " + String(mode));
-  const routes = config?.routes;
-  if (routes === undefined || (Array.isArray(routes) && routes.length === 0))
-    return Object.create(null);
+/** Convert flat table rows into the grouped representation. */
+function groupsFromRoutes(routes) {
   if (!Array.isArray(routes))
     throw new Error("virtual model routes table must be an array");
   const groups = Object.create(null);
@@ -388,6 +383,27 @@ export function resolveModelGroups(config) {
     });
   });
   return groups;
+}
+
+/** Resolve the routing table from either editor representation. The current
+ * mode's own field wins when it holds anything; when it is empty the other one
+ * is used, so switching editors never silently disables routing and a single
+ * populated side is enough. */
+export function resolveModelGroups(config) {
+  if (!isRecord(config)) return Object.create(null);
+  const mode = config.editorMode ?? "json";
+  if (mode !== "json" && mode !== "table")
+    throw new Error("unknown virtual model editor mode: " + String(mode));
+  const hasGroups = isRecord(config.groups) && Object.keys(config.groups).length > 0;
+  const hasRoutes = Array.isArray(config.routes) && config.routes.length > 0;
+  if (mode === "table") {
+    if (config.routes !== undefined && config.routes !== null && !Array.isArray(config.routes))
+      throw new Error("virtual model routes table must be an array");
+    if (hasRoutes) return groupsFromRoutes(config.routes);
+    return hasGroups ? config.groups : Object.create(null);
+  }
+  if (hasGroups) return config.groups;
+  return hasRoutes ? groupsFromRoutes(config.routes) : Object.create(null);
 }
 
 /** Virtual aliases route inside this channel; other selected channel models pass through unchanged. */
