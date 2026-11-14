@@ -21,5 +21,9 @@
     }
   },
   "maxRetries": 1,
-  "maxReplayBytes": 32768
+  "maxReplayBytes": 32768,
+  "fallbackStatuses": [429, 502, 503, 504],
+  "cooldownSeconds": 0,
+  "fallbackTraceEnabled": false,
+  "fallbackWebhookUrl": ""
 }

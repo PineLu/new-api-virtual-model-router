@@ -1,6 +1,6 @@
 {
   "name": "new-api-virtual-model-router",
-  "version": "0.2.1",
+  "version": "0.3.5",
   "private": true,
   "type": "module",
   "description": "Virtual model group routing for New API Provider Plugin API v1",
