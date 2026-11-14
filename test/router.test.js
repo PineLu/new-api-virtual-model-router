@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { meta, normalizeGroup, chooseModel, convertRequest, convertResponse } from "../plugin.js";
+import { meta, normalizeGroup, chooseModel, convertRequest, convertResponse, resolveModelGroups } from "../plugin.js";
 
 const groups = {
   "auto-code": {
@@ -32,6 +32,12 @@ test("manifest exposes the Chat Completions provider route", () => {
   assert.deepEqual(meta.models, ["auto-code"]); // rc.51 channel picker expects a non-empty models array
   assert.equal(meta.relay.length, 1);
   assert.equal(meta.relay[0].converter, "plugin");
+  assert.equal(meta.channelConfig.properties.editorMode.default, "json");
+  const rows = meta.channelConfig.properties.routes;
+  assert.equal(rows.type, "array");
+  assert.deepEqual(Object.keys(rows.items.properties), ["alias", "name", "priority", "weight"]);
+  assert.deepEqual(rows.visibleWhen.editorMode, ["table"]);
+  assert.deepEqual(meta.channelConfig.properties.groups.visibleWhen.editorMode, ["json"]);
 });
 test("validates alias, duplicates, cycles and positive traffic", () => {
   assert.equal(normalizeGroup(groups, "auto-code").length, 3);
@@ -104,5 +110,127 @@ test("large requests are never replayed", () => {
 test("rejects model_mapping hiding the alias", () => {
   const request = req();
   request.model = "mapped-upstream";
+  assert.throws(() => convertRequest(ctx(), request), /model_mapping/);
+});
+
+const tableRows = [
+  { alias: "auto-code", name: "model-a", priority: 10, weight: 70 },
+  { alias: "auto-code", name: "model-b", priority: 10, weight: 30 },
+  { alias: "auto-code", name: "model-c", priority: 5, weight: 100 },
+  { alias: "auto-chat", name: "model-d", priority: 1, weight: 1 }
+];
+
+test("visual table builds multiple groups without changing routing semantics", () => {
+  const config = { editorMode: "table", routes: tableRows };
+  const parsed = resolveModelGroups(config);
+  assert.deepEqual(normalizeGroup(parsed, "auto-code"), normalizeGroup(groups, "auto-code"));
+  assert.equal(normalizeGroup(parsed, "auto-chat")[0].name, "model-d");
+  const request = convertRequest(ctx(config), req());
+  assert.ok(["model-a", "model-b"].includes(request.body.model));
+  assert.equal(request.state.models.length, 3);
+});
+
+test("existing groups JSON remains compatible when mode is omitted", () => {
+  assert.equal(resolveModelGroups({ groups }), groups);
+  assert.equal(resolveModelGroups({ editorMode: "json", groups, routes: tableRows }), groups);
+});
+
+test("switching to table mode uses only table rows, not stale JSON", () => {
+  const result = convertRequest(ctx({
+    editorMode: "table",
+    routes: [{ alias: "auto-code", name: "table-only", priority: 1, weight: 1 }],
+    groups
+  }), req());
+  assert.equal(result.body.model, "table-only");
+});
+
+test("table mode rejects missing or malformed routing data", () => {
+  assert.deepEqual(Object.keys(resolveModelGroups({ editorMode: "table" })), []);
+  assert.throws(() => resolveModelGroups({ editorMode: "table", routes: [{ name: "bad" }] }), /alias must be non-empty/);
+  assert.throws(() => resolveModelGroups({ editorMode: "table", routes: {} }), /must be an array/);
+  assert.throws(() => resolveModelGroups({ editorMode: "nope", groups }), /unknown virtual model editor mode/);
+  const duplicate = { editorMode: "table", routes: [
+    { alias: "auto-code", name: "a" }, { alias: "auto-code", name: "a" }
+  ] };
+  assert.throws(() => normalizeGroup(resolveModelGroups(duplicate), "auto-code"), /duplicate candidate/);
+});
+
+test("table disabled target has zero weight and fallback keeps priority order", () => {
+  const selected = normalizeGroup(resolveModelGroups({
+    editorMode: "table",
+    routes: [
+      { alias: "auto-code", name: "disabled", priority: 20, weight: 0 },
+      { alias: "auto-code", name: "primary", priority: 10, weight: 1 },
+      { alias: "auto-code", name: "fallback", priority: 5, weight: 1 }
+    ]
+  }), "auto-code");
+  assert.equal(chooseModel(selected).name, "primary");
+  assert.equal(chooseModel(selected, ["primary"]).name, "fallback");
+});
+
+test("unmapped real model bypasses virtual selection and retains request fields", () => {
+  const request = req(false);
+  request.model = "openrouter/free";
+  request.body.model = "openrouter/free";
+  const out = convertRequest(ctx({ editorMode: "table", routes: tableRows }), request);
+  assert.equal(out.body.model, "openrouter/free");
+  assert.deepEqual(out.body.messages, request.body.messages);
+  assert.deepEqual(out.body.tools, request.body.tools);
+  assert.equal(out.nativeResponse, true);
+  assert.equal(out.state.direct, true);
+  assert.equal(out.state.maxRetries, 0);
+  assert.equal(request.body.model, "openrouter/free");
+});
+
+test("direct passthrough also works with JSON, empty table and no groups", () => {
+  const request = req(true);
+  request.model = "nvidia/nemotron-3.5-super-vl:free";
+  request.body.model = request.model;
+  for (const config of [
+    { groups },
+    { editorMode: "table", routes: [] },
+    { editorMode: "table" },
+    {}
+  ]) {
+    const result = convertRequest(ctx(config), request);
+    assert.equal(result.body.model, request.model);
+    assert.equal(result.stream, true);
+    assert.equal(result.state.direct, true);
+  }
+});
+
+test("virtual group takes precedence over direct passthrough", () => {
+  const result = convertRequest(ctx({ editorMode: "table", routes: tableRows }), req());
+  assert.ok(["model-a", "model-b"].includes(result.body.model));
+  assert.equal(result.state.direct, undefined);
+});
+
+test("malformed configured virtual group fails closed, not direct", () => {
+  assert.throws(
+    () => convertRequest(ctx({
+      editorMode: "table",
+      routes: [{ alias: "auto-code", name: "broken", weight: 0 }]
+    }), req()),
+    /positive weight/
+  );
+});
+
+test("direct upstream errors do not switch into virtual fallback targets", () => {
+  const request = req(false);
+  request.model = "openrouter/free";
+  request.body.model = request.model;
+  const first = convertRequest(ctx(), request);
+  const result = convertResponse({ state: first.state }, {
+    status: 429,
+    body: '{"error":{"message":"no quota"}}'
+  });
+  assert.equal(result.next, undefined);
+  assert.equal(result.body.error.message, "no quota");
+});
+
+test("request-model mismatch remains denied for direct calls", () => {
+  const request = req();
+  request.model = "openrouter/free";
+  request.body.model = "nvidia/nemotron-3.5-super-vl:free";
   assert.throws(() => convertRequest(ctx(), request), /model_mapping/);
 });

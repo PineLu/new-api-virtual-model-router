@@ -8,12 +8,20 @@ A lightweight **Provider Plugin API v1** for [New API](https://github.com/Quantu
 
 ## V1 scope
 
-- A single advertised P0 alias (`auto-code`) with multiple real upstream targets.
+- Virtual model aliases with multiple real upstream targets, plus transparent passthrough of directly requested models already selected by the New API gateway.
 - Highest priority first; weighted random selection within equal priority.
 - Disable a target via `enabled: false` or `weight: 0`.
 - Optional bounded fallback for HTTP 429, 502, 503, 504 before a successful response starts.
 - OpenAI Chat Completions JSON and SSE passthrough, including tool calls.
 - Single-file `plugin.js`, no external services and no New API fork.
+
+## Plugin-only editor (no New API fork)
+
+Plugin 0.2.1 adds a **Visual table** mode under native Plugin settings, with columns for public alias, upstream model, priority, and weight. JSON mode keeps the original `groups` object. Old saved channels without `editorMode` continue to use JSON; existing values are preserved.
+
+**Mode switching is not data conversion:** table and JSON keep separate values; only the selected mode drives routing. New API's native Routing & Mapping tab is not extensible by the current Provider Plugin API.
+
+See [editor guide](docs/config-editor-modes.md) and [table config example](examples/table-config.json).
 
 ## Configuration
 
@@ -25,6 +33,10 @@ A lightweight **Provider Plugin API v1** for [New API](https://github.com/Quantu
 6. Set plugin channel config: `groups` is an object keyed by alias (see [example](examples/channel-config.json)); `maxRetries` defaults to 1 and `maxReplayBytes` to 32768.
 7. Verify the virtual model's pricing in New API. This plugin **does not** override gateway billing.
 8. P0 advertises only `auto-code` in `meta.models`; adding new public aliases currently requires updating the manifest and re-uploading. Multiple-alias support is not yet live-tested.
+
+## Direct model passthrough
+
+The plugin only rewrites models whose names match a configured virtual group. For any other model selected by New API for this channel, the upstream request retains the original model string. The gateway still controls channel-model eligibility and API token/group authorization. Passthrough requests do **not** retry against virtual-model candidates, even if their upstream returns 429. Malformed configured groups fail closed rather than bypassing routing.
 
 ## Limitations
 

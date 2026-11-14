@@ -1,0 +1,25 @@
+{
+  "editorMode": "table",
+  "routes": [
+    {
+      "alias": "auto-code",
+      "name": "model-a",
+      "priority": 10,
+      "weight": 70
+    },
+    {
+      "alias": "auto-code",
+      "name": "model-b",
+      "priority": 10,
+      "weight": 30
+    },
+    {
+      "alias": "auto-code",
+      "name": "model-c",
+      "priority": 5,
+      "weight": 100
+    }
+  ],
+  "maxRetries": 1,
+  "maxReplayBytes": 32768
+}
