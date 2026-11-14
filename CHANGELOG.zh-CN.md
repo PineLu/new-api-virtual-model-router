@@ -1,10 +1,16 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.1.0
+version: 0.1.1
 locale: zh-CN
 ---
 # Changelog
+
+## [0.1.1]
+
+### Fixed
+
+- 修复 New API rc.51 创建渠道时因插件模型列表为空值触发的前端崩溃。
 
 ## [0.1.0]
 
