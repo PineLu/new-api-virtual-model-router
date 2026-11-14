@@ -4,11 +4,11 @@
 
 A lightweight **Provider Plugin API v1** for [New API](https://github.com/QuantumNous/new-api). Routes one virtual alias (for example `auto-code`) to multiple real models served by **the same provider, Base URL and API key**.
 
-> **Status: P0 prototype, not production verified.** Node unit tests pass; live New API plugin installation, streaming, and billing have not yet been verified.
+> **Status: P0 integration-tested on New API rc.51 with a local mock upstream; not production ready.** Real providers and accurate per-target billing are not verified.
 
 ## V1 scope
 
-- Multiple aliases and model groups.
+- A single advertised P0 alias (`auto-code`) with multiple real upstream targets.
 - Highest priority first; weighted random selection within equal priority.
 - Disable a target via `enabled: false` or `weight: 0`.
 - Optional bounded fallback for HTTP 429, 502, 503, 504 before a successful response starts.
@@ -24,6 +24,7 @@ A lightweight **Provider Plugin API v1** for [New API](https://github.com/Quantu
 5. Add the alias `auto-code` to the channel model list. **Do not set model_mapping**.
 6. Set plugin channel config: `groups` is an object keyed by alias (see [example](examples/channel-config.json)); `maxRetries` defaults to 1 and `maxReplayBytes` to 32768.
 7. Verify the virtual model's pricing in New API. This plugin **does not** override gateway billing.
+8. P0 advertises only `auto-code` in `meta.models`; adding new public aliases currently requires updating the manifest and re-uploading. Multiple-alias support is not yet live-tested.
 
 ## Limitations
 
@@ -36,3 +37,5 @@ Run tests: `npm test`.
 References: [Plugin API v1](https://github.com/QuantumNous/new-api/blob/main/docs/plugin-api/v1.md), [global model alias issue](https://github.com/QuantumNous/new-api/issues/3001).
 
 MIT licensed.
+
+P0 live testing: [2026-11-14 integration report](docs/live-validation-2026-11-14.md).
