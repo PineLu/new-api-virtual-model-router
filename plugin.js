@@ -6,7 +6,7 @@ export const meta = {
   apiVersion: 1,
   key: "virtual-model-router",
   name: { en: "Virtual Model Router", zh: "虚拟模型路由" },
-  version: "0.3.2",
+  version: "0.3.5",
   author: { name: "PineLu" },
   description: {
     en: "Route virtual model groups and pass through real models across Chat, Responses and Anthropic Messages using New API protocol converters.",
@@ -268,10 +268,11 @@ function emitFallbackEvent(state, event) {
 }
 
 /** Attach the per-request trace only when the fallback chain ultimately fails.
- * The gateway rebuilds non-2xx bodies from a fixed error schema, so a sibling
- * JSON field (body.vmr_fallback) is dropped; the message string survives, so
- * the trace rides at its end. Successful fallbacks keep the native response. */
-function attachTrace(reply, state) {
+ * With nativeResponse set, the host ignores a {body} returned for a non-2xx
+ * reply and honours only {error}/{next}; live rc.51 testing confirmed that a
+ * modified body never reaches the client while the error message does. Return
+ * a ConvertError that carries the trace at the end of the message. */
+function attachTrace(reply, state, status) {
   if (!state.fallbackTraceEnabled
       || !Array.isArray(state.fallbackTrace) || !state.fallbackTrace.length) return reply;
   let suffix;
@@ -280,19 +281,16 @@ function attachTrace(reply, state) {
     suffix = " | vmr_fallback=" + JSON.stringify(payload);
     if (suffix.length > TRACE_MESSAGE_LIMIT) suffix = suffix.slice(0, TRACE_MESSAGE_LIMIT) + "…";
   } catch { return reply; }
-  // JSON upstream error comes back as { body: { error } }, non-JSON as { error }.
-  if (isRecord(reply.body) && isRecord(reply.body.error)) {
-    const msg = String(reply.body.error.message ?? "");
-    return { ...reply, body: { ...reply.body, error: { ...reply.body.error, message: msg + suffix } } };
-  }
-  if (isRecord(reply.error)) {
-    const msg = String(reply.error.message ?? "");
-    return { ...reply, error: { ...reply.error, message: msg + suffix } };
-  }
-  if (isRecord(reply.body) && hasOwn(reply.body, "message")) {
-    return { ...reply, body: { ...reply.body, message: String(reply.body.message ?? "") + suffix } };
-  }
-  return reply;
+  // JSON upstream error arrives as { body: { error } }, non-JSON as { error }.
+  const source = isRecord(reply.body) && isRecord(reply.body.error) ? reply.body.error
+    : isRecord(reply.error) ? reply.error
+    : isRecord(reply.body) && hasOwn(reply.body, "message") ? reply.body
+    : null;
+  if (!source) return reply;
+  const error = { status, message: String(source.message ?? "") + suffix };
+  if (typeof source.type === "string" && source.type) error.type = source.type;
+  if (typeof source.code === "string" && source.code) error.code = source.code;
+  return { error };
 }
 
 export function normalizeGroup(groups, alias) {
@@ -469,7 +467,7 @@ export function convertResponse(ctx, response) {
   // too so a 2xx seen by the hook is never modified.
   const reply = upstreamReply(response);
   if (response.status < 400 || !isRecord(state)) return reply;
-  return attachTrace(reply, state);
+  return attachTrace(reply, state, response.status);
 }
 
 /** Hook required by converter='plugin'; 2xx SSE is normally nativeResponse. */

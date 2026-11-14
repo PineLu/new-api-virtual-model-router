@@ -59,10 +59,10 @@ Four optional channel settings, all opt-in with backward-compatible defaults:
 | --- | --- | --- |
 | `fallbackStatuses` | `[429, 502, 503, 504]` | Upstream HTTP statuses that trigger pre-output fallback. |
 | `cooldownSeconds` | `0` (off) | Best-effort in-process pause before reusing a target that just failed. |
-| `fallbackTraceEnabled` | `false` | Append `vmr_fallback` (alias / attempted / per-hop events) to the **failed** reply's error message. |
-| `fallbackWebhookUrl` | `""` (off) | Best-effort GET notification (query parameters) of each fallback event via host `utils.fetch`. |
+| `fallbackTraceEnabled` | `false` | On terminal failure return a `ConvertError` whose message ends with `vmr_fallback` (alias / attempted / per-hop events). |
+| `fallbackWebhookUrl` | `""` (off) | Best-effort GET notification via host `utils.fetch`; **not available on rc.51** ("utils.fetch is not available in convertResponse"). |
 
-Successful fallbacks stay native and are never modified. The cooldown table is in-process only (not shared across instances or restarts), The webhook is GET-only because provider hooks cannot POST, and host SSRF checks mean only public hosts work. Neither is a correctness guarantee. Full boundaries, rationale and verification notes: [fallback observability](docs/fallback-observability.md).
+Successful fallbacks stay native and are never modified. The cooldown table is in-process only (not shared across instances or restarts), The webhook is GET-only (provider hooks cannot POST) and, on rc.51, provider hooks have no `utils.fetch` at all, so it is a no-op there. Neither option is a correctness guarantee. Full boundaries, rationale and verification notes: [fallback observability](docs/fallback-observability.md).
 
 ## Direct model passthrough
 

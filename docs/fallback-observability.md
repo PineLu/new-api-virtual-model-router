@@ -1,8 +1,8 @@
-# Fallback configuration and observability (v0.3.1–v0.3.2)
+# Fallback configuration and observability (v0.3.1–v0.3.5)
 
 This document records what the v0.3.1 additions actually deliver, what live
-rc.51 testing found they could not deliver, and the v0.3.2 corrections. Read it
-before treating any of them as a production guarantee.
+rc.51 testing found they could not deliver, and the v0.3.2 / v0.3.5 corrections.
+Read it before treating any of them as a production guarantee.
 
 ## What was missing in v0.3.0
 
@@ -53,24 +53,26 @@ distributed coordination; not a circuit breaker. New API's channel-level
 require host-side support (persistent plugin state), which is outside this
 repository.
 
-### 3. Fallback trace and events — corrected in v0.3.2
+### 3. Fallback trace and events — corrected in v0.3.2 and v0.3.5
 
-**Why v0.3.1 failed live, and what v0.3.2 changed.** Both channels passed their
-hook-level unit tests in v0.3.1 but did nothing on a live rc.51 gateway:
+**What live rc.51 testing actually showed (three iterations).**
 
-- The v0.3.1 trace was a sibling JSON field (`body.vmr_fallback`). The gateway
-  rebuilds every non-2xx body from a fixed error schema, so that field was
-  dropped before the client saw it.
-- The v0.3.1 webhook used `POST` with a JSON body. The Plugin API v1 contract
-  allows POST with a body **only** in the `login`, `refresh`, `revoke`,
-  `exchangeKey`, `scheduled`, `ingress`, `egress`, `reply` and `report` hooks.
-  `convertResponse` is a provider hook, so the call never fired.
+- v0.3.1 attached `vmr_fallback` as a sibling JSON field (`body.vmr_fallback`); the client never saw it.
+- v0.3.2 appended it to `error.message` **inside the returned `{body}`**; the client still never saw it.
+- A diagnostic build proved why: with `nativeResponse`, the host **ignores a `{body}` returned for a non-2xx reply** and honours only `{error}`/`{next}`. It also proved `ctx.state` and `ctx.config` were intact (`traceLen:1`, `traceEnabled:true`, `attempted:[vmr-fail,vmr-ok]`), so the state was never the problem.
+- v0.3.5 therefore returns a `ConvertError` (`{error:{status,message,type?,code?}}`) and appends the trace to its message. Verified live on Chat, Anthropic Messages and Responses.
+
+**Webhook root cause (also measured).** The host answers the call with
+`utils.fetch is not available in convertResponse` — provider hooks have no
+fetch at all, not merely no POST. The option is kept for hosts that expose it;
+on rc.51 it is a no-op, and the failure is recorded on the trace as
+`{ok:false,error}`.
 
 Two channels are available:
 
 - **Per-request trace in `state.fallbackTrace`**: one entry per hop with `alias`, `from`, `status`, `to`, `webhook` (the outcome of the notification attempt, when configured) and (when a clock exists) `at`. Bounded to 8 entries.
-- **Terminal failure**: when `fallbackTraceEnabled` is true and the chain does not recover, ` | vmr_fallback={alias,attempted,events}` is appended to the error **message** (bounded to 4000 characters). The message is the only error field the gateway preserves verbatim; extra JSON siblings are not. Successful replies are **never** modified.
-- **Optional webhook**: with `fallbackWebhookUrl` set and host `utils.fetch` available, each fallback event is sent as `GET {url}?plugin=virtual-model-router&event=fallback&alias=…&from=…&status=…&to=…&at=…`. Invalid URLs are ignored. Host SSRF checks still apply, so only public hosts work; a loopback or private address is refused.
+- **Terminal failure**: when `fallbackTraceEnabled` is true and the chain does not recover, the hook returns a `ConvertError` whose **message** ends with ` | vmr_fallback={alias,attempted,events}` (bounded to 4000 characters). The host reproduces that message for the client; a modified `{body}` would be discarded. Successful replies are **never** modified.
+- **Optional webhook**: with `fallbackWebhookUrl` set, each fallback event is attempted as `GET {url}?plugin=virtual-model-router&event=fallback&alias=…&from=…&status=…&to=…&at=…` when the host exposes `utils.fetch` to provider hooks. **On rc.51 it does not** ("utils.fetch is not available in convertResponse"), so this is a no-op there; the attempt and its error are recorded on the trace.
 
 > **Webhook latency caveat**: `utils.fetch` is synchronous. A slow or unreachable endpoint can add up to the host's per-call timeout to *every* failover hop. Keep it off unless the endpoint is fast and trusted; a failure is recorded on the trace but the added latency is not removed.
 
@@ -87,8 +89,9 @@ persists).
 
 - `npm test`: 36/36 pass. `npm run check` passes.
 - Unit tests cover custom statuses, invalid-config degradation, cooldown hit and expiry, "all cooling" safety, trace on JSON and non-JSON terminal failures, successful-response immutability, webhook GET emission/degradation, and direct-passthrough isolation.
-- **Live rc.51 with v0.3.1**: `fallbackStatuses` and `cooldownSeconds` passed end to end — a custom `[418]` triggered three-protocol fallback (including streaming), `429` stopped triggering once overridden, and 4/4 post-failure requests skipped the cooled target. The channel form rendered all four fields correctly. `fallbackTraceEnabled` and `fallbackWebhookUrl` did not work — exactly the two failures this document records and v0.3.2 corrects.
-- **Still unverified for v0.3.2**: the corrected message trace and GET webhook have not been re-run on a live gateway from this repository. The webhook needs a public endpoint because host SSRF checks reject loopback and private addresses, so an isolated local mock cannot prove it. Verify both before a production rollout.
+- **Live rc.51, v0.3.1**: `fallbackStatuses` and `cooldownSeconds` passed end to end — a custom `[418]` triggered three-protocol fallback (including streaming), `429` stopped triggering once overridden, and 4/4 post-failure requests skipped the cooled target. The channel form rendered all four fields correctly. Trace and webhook failed.
+- **Live rc.51, v0.3.5**: `fallbackTraceEnabled` now works — Chat, Anthropic Messages and Responses all returned a 503 whose message ended with the full `vmr_fallback` payload. The webhook was confirmed impossible on this host; its failure appears on the trace as `{ok:false,error:"utils.fetch is not available in convertResponse"}`.
+- **Not verified**: the webhook against a host that does expose `fetch` to provider hooks, and any pricing/billing behaviour of the new options.
 
 ## Configuration example
 

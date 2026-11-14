@@ -29,7 +29,7 @@ const req = (stream = false) => ({
 
 test("manifest exposes Chat, Anthropic Messages and Responses routes through Chat", () => {
   assert.equal(meta.apiVersion, 1);
-  assert.equal(meta.version, "0.3.2");
+  assert.equal(meta.version, "0.3.5");
   assert.deepEqual(meta.models, ["auto-code"]); // rc.51 channel picker expects a non-empty models array
   assert.deepEqual(meta.relay, [
     {
@@ -402,10 +402,12 @@ test("fallback trace accumulates in state and is exposed on terminal failure", (
   assert.equal(second.state.fallbackTrace[0].status, 429);
   const last = convertResponse({ state: second.state }, { status: 503, body: '{"error":{"message":"down"}}' });
   assert.equal(last.next, undefined);
-  // The gateway rebuilds non-2xx bodies from a fixed schema, so the trace rides
-  // at the end of the message string instead of a sibling JSON field.
-  assert.ok(last.body.error.message.startsWith("down | vmr_fallback="));
-  const payload = JSON.parse(last.body.error.message.slice(last.body.error.message.indexOf("vmr_fallback=") + "vmr_fallback=".length));
+  // With nativeResponse the host ignores a non-2xx {body}; only {error} is used,
+  // so the trace rides at the end of the ConvertError message.
+  assert.equal(last.body, undefined);
+  assert.equal(last.error.status, 503);
+  assert.ok(last.error.message.startsWith("down | vmr_fallback="));
+  const payload = JSON.parse(last.error.message.slice(last.error.message.indexOf("vmr_fallback=") + "vmr_fallback=".length));
   assert.equal(payload.alias, a);
   assert.deepEqual(payload.attempted, ["prio-high", "prio-low"]);
   assert.equal(payload.events.length, 1);

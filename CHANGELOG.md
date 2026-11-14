@@ -1,12 +1,27 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.3.2
+version: 0.3.5
 locale: en
 translations:
   zh-CN: CHANGELOG.zh-CN.md
 ---
 # Changelog
+
+## [0.3.5]
+
+### Fixed
+
+- `fallbackTraceEnabled` now reaches the client on a live gateway. Live rc.51 testing showed the 0.3.2 message-suffix approach was still dropped: with `nativeResponse`, the host ignores a `{body}` returned for a non-2xx reply and honours only `{error}`/`{next}`. `attachTrace` now returns a `ConvertError` whose message carries ` | vmr_fallback={alias,attempted,events}`; verified on Chat, Anthropic Messages and Responses.
+
+### Known limitation (measured)
+
+- `fallbackWebhookUrl` cannot work on this host: the host reports **"utils.fetch is not available in convertResponse"**. The plugin still builds a GET attempt when the option is set and records `{ok:false,error}` on the trace, so the failure is visible instead of silent. The option is kept for hosts that do expose `fetch` to provider hooks; on rc.51 it is a no-op.
+
+### Compatibility
+
+- Internal diagnostic builds 0.3.3 and 0.3.4 were never released.
+- 0.3.2's message-suffix trace is superseded by this release; its behaviour is otherwise unchanged.
 
 ## [0.3.2]
 

@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-**当前阶段：v0.3.2 修正回退轨迹与 webhook 通道（详见 CHANGELOG），36 项单元测试通过。可配回退状态码与冷却已在 rc.51 实机验证；修正后的轨迹与 GET webhook 尚待在真实网关复测。真实提供商稳定性和差异化计费尚未验证，暂不视为生产就绪。**
+**当前阶段：v0.3.5 回退轨迹已在 rc.51 三协议实测通过；webhook 经实测在 rc.51 上不可用（provider hook 无 utils.fetch）。36 项单元测试通过；真实提供商稳定性和差异化计费尚未验证，暂不视为生产就绪。**
 
 ## 做什么
 
@@ -81,12 +81,12 @@
 |---|---|---|
 | `fallbackStatuses` | `[429, 502, 503, 504]` | 触发输出前回退的上游 HTTP 状态码。 |
 | `cooldownSeconds` | `0`（关闭） | 对刚失败的目标做进程内短期冷却，尽力而为。 |
-| `fallbackTraceEnabled` | `false` | 回退链**最终失败**时，把 `vmr_fallback`（别名、已尝试目标、逐跳事件）追加到错误消息末尾。 |
-| `fallbackWebhookUrl` | `""`（关闭） | 通过宿主 `utils.fetch` 以 GET 查询参数尽力而为地通知每次回退事件。 |
+| `fallbackTraceEnabled` | `false` | 回退链**最终失败**时返回 `ConvertError`，其 message 末尾携带 `vmr_fallback`（别名、已尝试目标、逐跳事件）。 |
+| `fallbackWebhookUrl` | `""`（关闭） | 通过宿主 `utils.fetch` 以 GET 查询参数通知；**rc.51 上不可用**（"utils.fetch is not available in convertResponse"）。 |
 
 - 成功回退仍为原生上游响应，插件不会修改。
 - 冷却表只在当前进程内，不跨实例、不跨重启共享；插件沙箱禁止用模块全局变量保存跨请求状态，因此这是**尽力而为的提示，不是熔断器**。New API 渠道级 `auto_ban` 仍是网关唯一的健康机制。
-- webhook 只能发 GET：provider hook 不允许带 body 的 POST；且受宿主 SSRF 检查限制，仅公网地址可用。调用结果会记录进轨迹（需开启 `fallbackTraceEnabled`），不影响路由本身。
+- webhook 只能发 GET，且 rc.51 的 provider hook 完全没有 `utils.fetch`，因此在该宿主上是空操作；调用结果会记录进轨迹（需开启 `fallbackTraceEnabled`），不影响路由本身。
 - 由于成功回退不会再进入 `convertResponse`，**插件内轨迹只能覆盖最终失败的链路**；成功回退请依赖可选 webhook 或上游侧日志。
 
 完整边界、取舍与验证说明：[回退可观测性](docs/fallback-observability.md)。

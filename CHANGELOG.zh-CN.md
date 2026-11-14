@@ -1,10 +1,25 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.3.2
+version: 0.3.5
 locale: zh-CN
 ---
 # Changelog
+
+## [0.3.5]
+
+### Fixed
+
+- `fallbackTraceEnabled` 现已在真实网关生效。rc.51 实测证明 0.3.2 的“追加到 message”仍会被丢弃：`nativeResponse` 下宿主对非 2xx 响应只采用 `{error}`/`{next}`，忽略 `{body}`。`attachTrace` 改为返回 `ConvertError`，在 message 末尾携带 ` | vmr_fallback={alias,attempted,events}`；Chat、Anthropic Messages、Responses 三协议均已实测通过。
+
+### Known limitation (measured)
+
+- `fallbackWebhookUrl` 在该宿主上无法工作：宿主明确返回 **"utils.fetch is not available in convertResponse"**。插件仍会在配置后构造 GET 请求，并把 `{ok:false,error}` 记入轨迹，失败可观测而非静默。保留该选项是为了将来对 provider hook 开放 fetch 的宿主；在 rc.51 上它是空操作。
+
+### Compatibility
+
+- 内部诊断构建 0.3.3、0.3.4 从未发布。
+- 0.3.2 的 message 追加方案被本版本取代，其余行为不变。
 
 ## [0.3.2]
 
