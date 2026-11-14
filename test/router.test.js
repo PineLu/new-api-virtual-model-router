@@ -145,8 +145,9 @@ test("switching to table mode uses only table rows, not stale JSON", () => {
 });
 
 test("table mode rejects missing or malformed routing data", () => {
-  assert.throws(() => resolveModelGroups({ editorMode: "table" }), /at least one row/);
+  assert.deepEqual(Object.keys(resolveModelGroups({ editorMode: "table" })), []);
   assert.throws(() => resolveModelGroups({ editorMode: "table", routes: [{ name: "bad" }] }), /alias must be non-empty/);
+  assert.throws(() => resolveModelGroups({ editorMode: "table", routes: {} }), /must be an array/);
   assert.throws(() => resolveModelGroups({ editorMode: "nope", groups }), /unknown virtual model editor mode/);
   const duplicate = { editorMode: "table", routes: [
     { alias: "auto-code", name: "a" }, { alias: "auto-code", name: "a" }
@@ -165,4 +166,71 @@ test("table disabled target has zero weight and fallback keeps priority order", 
   }), "auto-code");
   assert.equal(chooseModel(selected).name, "primary");
   assert.equal(chooseModel(selected, ["primary"]).name, "fallback");
+});
+
+test("unmapped real model bypasses virtual selection and retains request fields", () => {
+  const request = req(false);
+  request.model = "openrouter/free";
+  request.body.model = "openrouter/free";
+  const out = convertRequest(ctx({ editorMode: "table", routes: tableRows }), request);
+  assert.equal(out.body.model, "openrouter/free");
+  assert.deepEqual(out.body.messages, request.body.messages);
+  assert.deepEqual(out.body.tools, request.body.tools);
+  assert.equal(out.nativeResponse, true);
+  assert.equal(out.state.direct, true);
+  assert.equal(out.state.maxRetries, 0);
+  assert.equal(request.body.model, "openrouter/free");
+});
+
+test("direct passthrough also works with JSON, empty table and no groups", () => {
+  const request = req(true);
+  request.model = "nvidia/nemotron-3.5-super-vl:free";
+  request.body.model = request.model;
+  for (const config of [
+    { groups },
+    { editorMode: "table", routes: [] },
+    { editorMode: "table" },
+    {}
+  ]) {
+    const result = convertRequest(ctx(config), request);
+    assert.equal(result.body.model, request.model);
+    assert.equal(result.stream, true);
+    assert.equal(result.state.direct, true);
+  }
+});
+
+test("virtual group takes precedence over direct passthrough", () => {
+  const result = convertRequest(ctx({ editorMode: "table", routes: tableRows }), req());
+  assert.ok(["model-a", "model-b"].includes(result.body.model));
+  assert.equal(result.state.direct, undefined);
+});
+
+test("malformed configured virtual group fails closed, not direct", () => {
+  assert.throws(
+    () => convertRequest(ctx({
+      editorMode: "table",
+      routes: [{ alias: "auto-code", name: "broken", weight: 0 }]
+    }), req()),
+    /positive weight/
+  );
+});
+
+test("direct upstream errors do not switch into virtual fallback targets", () => {
+  const request = req(false);
+  request.model = "openrouter/free";
+  request.body.model = request.model;
+  const first = convertRequest(ctx(), request);
+  const result = convertResponse({ state: first.state }, {
+    status: 429,
+    body: '{"error":{"message":"no quota"}}'
+  });
+  assert.equal(result.next, undefined);
+  assert.equal(result.body.error.message, "no quota");
+});
+
+test("request-model mismatch remains denied for direct calls", () => {
+  const request = req();
+  request.model = "openrouter/free";
+  request.body.model = "nvidia/nemotron-3.5-super-vl:free";
+  assert.throws(() => convertRequest(ctx(), request), /model_mapping/);
 });
