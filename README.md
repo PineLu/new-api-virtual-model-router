@@ -49,7 +49,7 @@ RelayKit converts the client request into Chat Completions before convertRequest
 
 This reuses New API's built-in converters; the plugin does not implement Anthropic or Responses codecs. Protocol-specific fields and semantics are only as compatible as the host converter. In particular, verify thinking/reasoning, tool calls, multi-turn state and streaming behavior against the exact New API build and client.
 
-See [multi-protocol routing design and validation](docs/multi-protocol-routing.md).
+See [multi-protocol routing design and validation](docs/multi-protocol-routing.md). Run [the protocol test script](scripts/test_protocols.py) against New API using an environment-provided API key; see the [test guide](docs/protocol-test-script.md). It validates JSON, SSE, and function/tool calling for all three protocols.
 
 ## Direct model passthrough
 

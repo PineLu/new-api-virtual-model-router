@@ -55,6 +55,8 @@
 
 详细设计与验证清单：[多协议路由设计](docs/multi-protocol-routing.md)。
 
+多协议真实请求检查：运行 [测试脚本](scripts/test_protocols.py)，操作说明见 [测试指南](docs/protocol-test-script.md)。测试 Chat、Anthropic Messages、Responses 的非流式 JSON、SSE 和工具调用；无需第三方 Python SDK。
+
 ## 真实模型直通
 
 请求模型命中虚拟模型组时，按配置的优先级和权重路由；**未命中虚拟组时直接将相同模型名转发给当前渠道的上游**，不重写模型，也不做跨虚拟组故障切换。New API 网关仍负责选择允许该模型的渠道、令牌权限、分组和鉴权，因此不需在插件内维护第二份允许列表。

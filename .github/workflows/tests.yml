@@ -11,3 +11,5 @@ jobs:
         with:
           node-version: '22'
       - run: npm test
+      - name: Test protocol script with local mock (no API key)
+        run: python3 -m unittest discover -s test -p 'test_protocol_script.py' -v
