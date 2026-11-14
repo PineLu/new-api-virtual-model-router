@@ -1,23 +1,19 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.1.1
+version: 0.1.2
 locale: en
 translations:
   zh-CN: CHANGELOG.zh-CN.md
 ---
 # Changelog
 
-## [0.1.1]
+## [0.1.2]
 
 ### Fixed
 
-- Supply an empty model list to prevent the New API rc.51 channel picker from reading null.length.
-
-## [0.1.0]
+- Advertise `auto-code` in `meta.models` so the New API rc.51 channel picker no longer crashes on null model metadata.
 
 ### Added
 
-- Prototype virtual model groups with priority and weighted selection.
-- Bounded pre-response HTTP fallback.
-- Native OpenAI Chat Completions JSON/SSE passthrough and unit tests.
+- Live P0 integration verification against New API rc.51 with a mock upstream.
