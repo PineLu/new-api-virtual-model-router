@@ -10,6 +10,17 @@
 
 首版只公布一个对外别名 `auto-code`，内部支持多个真实模型；提供优先级 + 权重、HTTP 429/502/503/504 失败后的有限降级、Chat Completions 的 JSON 和 SSE 原生透传。**不做**智能任务分类、跨渠道/跨提供商、状态熔断、成本智能路由或其他复杂策略。
 
+## 配置方式（不需要 Fork New API）
+
+插件 0.2.0 支持在 New API 原生「插件设置」内选择两种编辑方式：
+
+- **可视化表格：** 四列「虚拟模型、上游模型、优先级、权重」，可以增删行；示例：[table-config.json](examples/table-config.json)。
+- **JSON（兼容旧配置）：** 继续编辑原来的 `groups` 对象，已有配置无需迁移。
+
+**重要限制：** 两种格式不会自动互转，切换配置方式不会清空旧数据，路由只使用当前选择的格式。旧渠道没有 `editorMode` 时继续使用 JSON。配置仍显示在「插件设置」下，不能只通过插件 API 移动到「路由与映射」标签。
+
+完整说明：[双模式配置指南](docs/config-editor-modes.md)。
+
 ## 安装（需实际网关验证）
 
 1. 确保 New API 版本支持 Provider Plugin（建议 v1.0.0-rc.50 或更新）。
@@ -17,7 +28,7 @@
 3. 新建 **61 / Task Plugin** 渠道并绑定 `virtual-model-router`。
 4. 渠道 Base URL 与 API Key 填写目标上游提供商信息。
 5. 渠道模型列表加入 `auto-code`，**不要对别名额外配置 `model_mapping`**。
-6. 插件渠道配置字段 `groups` 按 [示例](examples/channel-config.json) 的 `groups` 对象填写。重试次数默认 1 次；最大允许重放请求大小默认 32768 字节。
+6. 在插件设置中选择表格或 JSON。表格配置见 [示例](examples/table-config.json)；旧版 JSON 配置继续使用 [groups 示例](examples/channel-config.json)。重试次数默认 1 次；最大允许重放请求大小默认 32768 字节。
 7. 在 New API 中独立配置虚拟模型的售价。**插件不会按照实际选中的真实模型自动调整扣费。**
 8. P0 的 `meta.models` 目前只公布 `auto-code`；新增对外别名需要更新插件清单并重新上传，多别名路由尚未完成实机验证。
 
