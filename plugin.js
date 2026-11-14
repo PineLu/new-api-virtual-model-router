@@ -6,7 +6,7 @@ export const meta = {
   apiVersion: 1,
   key: "virtual-model-router",
   name: { en: "Virtual Model Router", zh: "虚拟模型路由" },
-  version: "0.3.0",
+  version: "0.3.1",
   author: { name: "PineLu" },
   description: {
     en: "Route virtual model groups and pass through real models across Chat, Responses and Anthropic Messages using New API protocol converters.",
@@ -110,17 +110,169 @@ export const meta = {
         type: "integer",
         title: { en: "Maximum replay body bytes", zh: "允许重放的最大请求字节数" },
         minimum: 0, maximum: 65536, default: 32768
+      },
+      fallbackStatuses: {
+        type: "array",
+        title: { en: "Retryable upstream statuses", zh: "可回退的上游状态码" },
+        description: {
+          en: "Pre-output upstream HTTP statuses that trigger fallback. Defaults to 429, 502, 503, 504. Invalid or empty values fall back to the defaults.",
+          zh: "触发回退的上游 HTTP 状态码（响应输出前）。默认 429、502、503、504；配置非法或为空时回退到默认值。"
+        },
+        items: {
+          type: "integer",
+          title: { en: "HTTP status", zh: "HTTP 状态码" },
+          minimum: 400, maximum: 599
+        },
+        uniqueItems: true,
+        default: [429, 502, 503, 504]
+      },
+      cooldownSeconds: {
+        type: "integer",
+        title: { en: "Failed-target cooldown (seconds)", zh: "失败目标冷却秒数" },
+        description: {
+          en: "Best-effort, in-process cooldown for a target that returned a retryable status. 0 disables it. Not shared across instances or restarts.",
+          zh: "对返回可回退状态码的上游目标做进程内尽力而为的短期冷却，0 表示关闭；不跨实例、不跨重启共享。"
+        },
+        minimum: 0, maximum: 600, default: 0
+      },
+      fallbackTraceEnabled: {
+        type: "boolean",
+        title: { en: "Attach fallback trace on failure", zh: "失败时附带回退轨迹" },
+        description: {
+          en: "When a fallback chain ultimately fails, attach a vmr_fallback object to the error response. Successful fallbacks stay native and are not modified.",
+          zh: "回退链最终失败时，在错误响应中附带 vmr_fallback 轨迹；成功回退仍为原生上游响应，不做修改。"
+        },
+        default: false
+      },
+      fallbackWebhookUrl: {
+        type: "string",
+        format: "url",
+        title: { en: "Fallback event webhook (optional)", zh: "回退事件 webhook（可选）" },
+        description: {
+          en: "Optional absolute http(s) URL for best-effort fallback event POSTs. Requires the host to expose utils.fetch and allow the host. Empty disables it.",
+          zh: "可选 http(s) 绝对地址，尽力而为地上报回退事件；依赖宿主提供 utils.fetch 并放行该地址，留空即关闭。"
+        },
+        default: ""
       }
     }
   }
 };
 
 const UPSTREAM_ENDPOINT = "/v1/chat/completions";
-const FALLBACK_STATUSES = [429, 502, 503, 504];
+const DEFAULT_FALLBACK_STATUSES = Object.freeze([429, 502, 503, 504]);
+const COOLDOWN_MAX_ENTRIES = 256;
+const TRACE_MAX_EVENTS = 8;
 const isRecord = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const hasOwn = (v, key) => Object.prototype.hasOwnProperty.call(v, key);
 const integerInRange = (v, min, max, fallback) =>
   Number.isInteger(v) && v >= min && v <= max ? v : fallback;
+
+/** Best-effort in-process cooldown marks. Keys are plain strings, values are
+ * plain numbers only: never retain request bodies, ctx or other host objects,
+ * because plugin runtimes are pooled across requests. Not shared across
+ * instances or restarts. */
+const cooldownMarks = new Map();
+
+/** Host clock when available, otherwise a local fallback. Returns 0 when no
+ * usable clock exists; cooldown then degrades to disabled rather than guessing. */
+function nowSeconds() {
+  let t = 0;
+  try {
+    if (typeof utils !== "undefined" && utils && typeof utils.unixNow === "function") {
+      t = Number(utils.unixNow());
+    } else if (typeof Date !== "undefined" && typeof Date.now === "function") {
+      t = Date.now() / 1000;
+    }
+  } catch {}
+  return Number.isFinite(t) && t > 0 ? t : 0;
+}
+
+/** Validate the configurable retryable-status list. Invalid/empty input falls
+ * back to the v0.3.0 defaults so a bad config can never disable fallback. */
+export function normalizeFallbackStatuses(value) {
+  if (!Array.isArray(value)) return DEFAULT_FALLBACK_STATUSES;
+  const seen = new Set();
+  const out = [];
+  for (const raw of value) {
+    if (!Number.isInteger(raw) || raw < 400 || raw > 599 || seen.has(raw)) continue;
+    seen.add(raw);
+    out.push(raw);
+  }
+  return out.length ? out : DEFAULT_FALLBACK_STATUSES;
+}
+
+function cooldownKey(alias, name) {
+  return String(alias) + "\u0000" + String(name);
+}
+
+/** Time-delta based, so the clock unit (seconds or milliseconds on the host)
+ * only needs to be consistent between two calls. */
+function isCooling(alias, name, now, seconds) {
+  if (!(seconds > 0) || !now) return false;
+  const mark = cooldownMarks.get(cooldownKey(alias, name));
+  return Number.isFinite(mark) && now - mark >= 0 && now - mark < seconds;
+}
+
+function markCooling(alias, name, now, seconds) {
+  if (!(seconds > 0) || !now) return;
+  if (cooldownMarks.size >= COOLDOWN_MAX_ENTRIES) {
+    for (const [key, mark] of cooldownMarks) {
+      if (!Number.isFinite(mark) || now - mark >= seconds) cooldownMarks.delete(key);
+    }
+    // Still full (all entries live): drop the oldest insertion to stay bounded.
+    while (cooldownMarks.size >= COOLDOWN_MAX_ENTRIES) {
+      const oldest = cooldownMarks.keys().next();
+      if (oldest.done) break;
+      cooldownMarks.delete(oldest.value);
+    }
+  }
+  cooldownMarks.set(cooldownKey(alias, name), now);
+}
+
+/** Prefer a non-cooling candidate; if every candidate is cooling, keep the
+ * original choice so cooldown can never make an alias unavailable. */
+function chooseWithCooldown(models, alias, excluded, now, seconds) {
+  const primary = chooseModel(models, excluded);
+  if (primary === null || !(seconds > 0) || !now) return primary;
+  const blocked = new Set(excluded);
+  for (const model of models) {
+    if (!blocked.has(model.name) && isCooling(alias, model.name, now, seconds))
+      blocked.add(model.name);
+  }
+  const alternative = chooseModel(models, [...blocked]);
+  return alternative === null ? primary : alternative;
+}
+
+/** Optional best-effort fallback event POST. Requires the host to expose
+ * utils.fetch and allow the target host; any failure is swallowed. */
+function emitFallbackEvent(state, event) {
+  const url = state.fallbackWebhookUrl;
+  if (typeof url !== "string" || !/^https?:\/\//.test(url)) return;
+  try {
+    if (typeof utils === "undefined" || !utils || typeof utils.fetch !== "function") return;
+    utils.fetch({
+      url,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plugin: "virtual-model-router", event: "fallback", ...event })
+    });
+  } catch {}
+}
+
+/** Attach the per-request trace only when the fallback chain ultimately fails.
+ * Successful fallbacks keep the native upstream response untouched. */
+function attachTrace(reply, state) {
+  if (!state.fallbackTraceEnabled
+      || !Array.isArray(state.fallbackTrace) || !state.fallbackTrace.length) return reply;
+  const vmr_fallback = {
+    alias: state.alias, attempted: state.attempted, events: state.fallbackTrace
+  };
+  // A JSON upstream reply is handed back as { body }, a non-JSON one as a
+  // plugin-synthesized { error }. Attach to whichever shape actually exists.
+  if (isRecord(reply.body)) return { ...reply, body: { ...reply.body, vmr_fallback } };
+  if (isRecord(reply.error)) return { ...reply, error: { ...reply.error, vmr_fallback } };
+  return reply;
+}
 
 export function normalizeGroup(groups, alias) {
   if (!isRecord(groups) || typeof alias !== "string" || !hasOwn(groups, alias))
@@ -238,18 +390,26 @@ export function convertRequest(ctx, request) {
     };
   }
   const models = normalizeGroup(groups, alias);
-  const chosen = chooseModel(models);
+  const config = isRecord(ctx.config) ? ctx.config : {};
+  const fallbackStatuses = normalizeFallbackStatuses(config.fallbackStatuses);
+  const cooldownSeconds = integerInRange(config.cooldownSeconds, 0, 600, 0);
+  const now = cooldownSeconds > 0 ? nowSeconds() : 0;
+  const chosen = chooseWithCooldown(models, alias, [], now, cooldownSeconds);
   if (chosen === null) throw new Error("virtual model " + alias + ": no eligible candidates");
   const body = { ...request.body, model: chosen.name };
-  const maxRetries = integerInRange(ctx.config?.maxRetries, 0, 2, 1);
-  const maxReplayBytes = integerInRange(ctx.config?.maxReplayBytes, 0, 65536, 32768);
+  const maxRetries = integerInRange(config.maxRetries, 0, 2, 1);
+  const maxReplayBytes = integerInRange(config.maxReplayBytes, 0, 65536, 32768);
   const replayBody = maxRetries > 0 && utf8Length(JSON.stringify(body), maxReplayBytes) <= maxReplayBytes
     ? body : null;
   return {
     body, path: UPSTREAM_ENDPOINT, stream: request.stream === true, nativeResponse: true,
     state: {
       alias, models, attempted: [chosen.name], maxRetries,
-      stream: request.stream === true, replayBody
+      stream: request.stream === true, replayBody,
+      fallbackStatuses, cooldownSeconds,
+      fallbackTraceEnabled: config.fallbackTraceEnabled === true,
+      fallbackWebhookUrl: typeof config.fallbackWebhookUrl === "string" ? config.fallbackWebhookUrl : "",
+      fallbackTrace: []
     }
   };
 }
@@ -257,20 +417,37 @@ export function convertRequest(ctx, request) {
 /** Only fail over on retryable pre-output HTTP responses, never broken streams. */
 export function convertResponse(ctx, response) {
   const state = ctx.state;
-  if (FALLBACK_STATUSES.includes(response.status)
+  const statuses = normalizeFallbackStatuses(state?.fallbackStatuses);
+  if (statuses.includes(response.status)
       && isRecord(state) && isRecord(state.replayBody)
       && Array.isArray(state.models) && Array.isArray(state.attempted)
       && state.attempted.length <= state.maxRetries) {
-    const chosen = chooseModel(state.models, state.attempted);
-    if (chosen !== null) return {
-      next: {
-        path: UPSTREAM_ENDPOINT, body: { ...state.replayBody, model: chosen.name },
-        stream: state.stream, nativeResponse: true
-      },
-      state: { ...state, attempted: [...state.attempted, chosen.name] }
-    };
+    const seconds = integerInRange(state.cooldownSeconds, 0, 600, 0);
+    const now = seconds > 0 ? nowSeconds() : 0;
+    const failed = state.attempted[state.attempted.length - 1];
+    markCooling(state.alias, failed, now, seconds);
+    const chosen = chooseWithCooldown(state.models, state.alias, state.attempted, now, seconds);
+    if (chosen !== null) {
+      const trace = Array.isArray(state.fallbackTrace) ? state.fallbackTrace : [];
+      const event = { alias: state.alias, from: failed, status: response.status, to: chosen.name };
+      if (now) event.at = now;
+      const events = trace.length < TRACE_MAX_EVENTS ? [...trace, event] : trace;
+      emitFallbackEvent(state, event);
+      return {
+        next: {
+          path: UPSTREAM_ENDPOINT, body: { ...state.replayBody, model: chosen.name },
+          stream: state.stream, nativeResponse: true
+        },
+        state: { ...state, attempted: [...state.attempted, chosen.name], fallbackTrace: events }
+      };
+    }
   }
-  return upstreamReply(response);
+  // Only a failed terminal reply carries a trace. Successful upstream responses
+  // are normally native (this hook is not called), but keep the guarantee here
+  // too so a 2xx seen by the hook is never modified.
+  const reply = upstreamReply(response);
+  if (response.status < 400 || !isRecord(state)) return reply;
+  return attachTrace(reply, state);
 }
 
 /** Hook required by converter='plugin'; 2xx SSE is normally nativeResponse. */

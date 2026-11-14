@@ -4,14 +4,14 @@
 
 A lightweight **Provider Plugin API v1** for [New API](https://github.com/QuantumNous/new-api). Routes one virtual alias (for example `auto-code`) to multiple real models served by **the same provider, Base URL and API key**.
 
-> **Status: v0.3.0 adds multi-protocol routes and passes 22 unit tests.** The new Anthropic/Responses routes still require live rc.51 integration tests; real-provider reliability and accurate per-target billing are not verified.
+> **Status: v0.3.1 adds configurable retryable statuses, an optional best-effort cooldown and fallback tracing, and passes 36 unit tests.** The Anthropic/Responses routes and the new options still require live rc.51 integration tests; real-provider reliability and accurate per-target billing are not verified.
 
 ## Current scope
 
 - Virtual model aliases with multiple real upstream targets, plus transparent passthrough of directly requested models already selected by the New API gateway.
 - Highest priority first; weighted random selection within equal priority.
 - Disable a target via `enabled: false` or `weight: 0`.
-- Optional bounded fallback for HTTP 429, 502, 503, 504 before a successful response starts.
+- Optional bounded fallback before a successful response starts; the retryable status list is configurable (`fallbackStatuses`, default `429, 502, 503, 504`).
 - OpenAI Chat Completions, Anthropic Messages and OpenAI Responses client routes, all converging on one OpenAI Chat routing core through New API RelayKit.
 - OpenAI Chat JSON/SSE passthrough, including tool calls; protocol conversion is owned by New API, not reimplemented in this plugin.
 - Single-file `plugin.js`, no external services and no New API fork.
@@ -31,7 +31,7 @@ See [editor guide](docs/config-editor-modes.md) and [table config example](examp
 3. Create a type-61 Task Plugin channel bound to `virtual-model-router`.
 4. Supply the real provider's Base URL and API key.
 5. Add the alias `auto-code` to the channel model list. **Do not set model_mapping**.
-6. Set plugin channel config: `groups` is an object keyed by alias (see [example](examples/channel-config.json)); `maxRetries` defaults to 1 and `maxReplayBytes` to 32768.
+6. Set plugin channel config: `groups` is an object keyed by alias (see [example](examples/channel-config.json)); `maxRetries` defaults to 1 and `maxReplayBytes` to 32768. All v0.3.1 options are optional — see [fallback observability](docs/fallback-observability.md).
 7. Verify the virtual model's pricing in New API. This plugin **does not** override gateway billing.
 8. The manifest currently advertises only `auto-code` in `meta.models`; adding new public aliases currently requires updating the manifest and re-uploading. Multiple-alias support is not yet live-tested.
 
@@ -51,15 +51,28 @@ This reuses New API's built-in converters; the plugin does not implement Anthrop
 
 See [multi-protocol routing design and validation](docs/multi-protocol-routing.md). Run [the protocol test script](scripts/test_protocols.py) against New API using an environment-provided API key; see the [test guide](docs/protocol-test-script.md). It validates JSON, SSE, and function/tool calling for all three protocols.
 
+## Fallback controls (v0.3.1)
+
+Four optional channel settings, all opt-in with backward-compatible defaults:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `fallbackStatuses` | `[429, 502, 503, 504]` | Upstream HTTP statuses that trigger pre-output fallback. |
+| `cooldownSeconds` | `0` (off) | Best-effort in-process pause before reusing a target that just failed. |
+| `fallbackTraceEnabled` | `false` | Attach `vmr_fallback` (alias / attempted / per-hop events) to a **failed** reply. |
+| `fallbackWebhookUrl` | `""` (off) | Best-effort POST of each fallback event via host `utils.fetch`. |
+
+Successful fallbacks stay native and are never modified. The cooldown table is in-process only (not shared across instances or restarts), and the webhook depends on host support — neither is a correctness guarantee. Full boundaries, rationale and verification notes: [fallback observability](docs/fallback-observability.md).
+
 ## Direct model passthrough
 
 The plugin only rewrites models whose names match a configured virtual group. For any other model selected by New API for this channel, the upstream request retains the original model string. The gateway still controls channel-model eligibility and API token/group authorization. Passthrough requests do **not** retry against virtual-model candidates, even if their upstream returns 429. Malformed configured groups fail closed rather than bypassing routing.
 
 ## Limitations
 
-Does not route across existing New API channels or provider credentials. Does not implement intelligent task classification, persistent round robin, sticky sessions, circuit breakers, or cost-based model selection. Requests exceeding `maxReplayBytes` are never replayed. In-flight failed streams are never restarted. HTTP 502/504 may follow an upstream execution that incurred cost, so retry can cause duplicate upstream charges.
+Does not route across existing New API channels or provider credentials. Does not implement intelligent task classification, persistent round robin, sticky sessions, or cost-based model selection. The optional cooldown is a short-lived, in-process best-effort hint rather than a circuit breaker; New API's own channel-level `auto_ban` remains the only gateway health mechanism. Requests exceeding `maxReplayBytes` are never replayed. In-flight failed streams are never restarted. HTTP 502/504 may follow an upstream execution that incurred cost, so retry can cause duplicate upstream charges.
 
-Successful upstream responses expose the **actual target model name** for diagnosis. The upstream Chat JSON/SSE and usage remain native; New API converts them for the client. New API billing uses its own configured pricing; exact per-target settlement is **not** guaranteed.
+Successful upstream responses expose the **actual target model name** for diagnosis. The upstream Chat JSON/SSE and usage remain native; New API converts them for the client. Because a successful failover never re-enters `convertResponse`, **only failed chains can carry an in-plugin trace** — use the optional webhook or upstream-side logs for successful failovers. New API billing uses its own configured pricing; exact per-target settlement is **not** guaranteed.
 
 Run tests: `npm test`.
 

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { meta, normalizeGroup, chooseModel, convertRequest, convertResponse, resolveModelGroups } from "../plugin.js";
+import { meta, normalizeGroup, chooseModel, convertRequest, convertResponse, resolveModelGroups, normalizeFallbackStatuses } from "../plugin.js";
 
 const groups = {
   "auto-code": {
@@ -29,7 +29,7 @@ const req = (stream = false) => ({
 
 test("manifest exposes Chat, Anthropic Messages and Responses routes through Chat", () => {
   assert.equal(meta.apiVersion, 1);
-  assert.equal(meta.version, "0.3.0");
+  assert.equal(meta.version, "0.3.1");
   assert.deepEqual(meta.models, ["auto-code"]); // rc.51 channel picker expects a non-empty models array
   assert.deepEqual(meta.relay, [
     {
@@ -54,6 +54,16 @@ test("manifest exposes Chat, Anthropic Messages and Responses routes through Cha
   assert.deepEqual(Object.keys(rows.items.properties), ["alias", "name", "priority", "weight"]);
   assert.deepEqual(rows.visibleWhen.editorMode, ["table"]);
   assert.deepEqual(meta.channelConfig.properties.groups.visibleWhen.editorMode, ["json"]);
+  const cfg = meta.channelConfig.properties;
+  assert.deepEqual(cfg.fallbackStatuses.default, [429, 502, 503, 504]);
+  assert.equal(cfg.fallbackStatuses.items.type, "integer");
+  assert.equal(cfg.fallbackStatuses.items.minimum, 400);
+  assert.equal(cfg.fallbackStatuses.items.maximum, 599);
+  assert.ok(cfg.fallbackStatuses.items.title, "ConfigField.items requires a title");
+  assert.equal(cfg.fallbackStatuses.uniqueItems, true);
+  assert.equal(cfg.cooldownSeconds.default, 0);
+  assert.equal(cfg.fallbackTraceEnabled.default, false);
+  assert.equal(cfg.fallbackWebhookUrl.default, "");
 });
 test("all client protocols share the same canonical Chat routing core", () => {
   const singleTarget = { "auto-code": { models: [{ name: "model-only" }] } };
@@ -276,4 +286,219 @@ test("request-model mismatch remains denied for direct calls", () => {
   request.model = "openrouter/free";
   request.body.model = "nvidia/nemotron-3.5-super-vl:free";
   assert.throws(() => convertRequest(ctx(), request), /model_mapping/);
+});
+
+// ---- 0.3.1: configurable statuses, best-effort cooldown, fallback trace ----
+
+// Distinct priorities make target selection deterministic regardless of Math.random.
+const prioGroups = (alias) => ({ [alias]: { models: [
+  { name: "prio-high", priority: 10, weight: 1 },
+  { name: "prio-low", priority: 5, weight: 1 }
+] } });
+const prioReq = (alias) => ({
+  model: alias, stream: false,
+  body: { model: alias, stream: false, messages: [{ role: "user", content: "hi" }] }
+});
+const prioCtx = (alias, config = {}) => ({ config: { groups: prioGroups(alias), maxRetries: 1, maxReplayBytes: 32768, ...config } });
+
+// Inject a controllable host clock; clean up so it never leaks between tests.
+function withClock(t, fn) {
+  const saved = globalThis.utils;
+  globalThis.utils = { unixNow: () => t };
+  try { return fn(); } finally {
+    if (saved === undefined) delete globalThis.utils; else globalThis.utils = saved;
+  }
+}
+
+test("normalizeFallbackStatuses validates and defaults", () => {
+  assert.deepEqual(normalizeFallbackStatuses(undefined), [429, 502, 503, 504]);
+  assert.deepEqual(normalizeFallbackStatuses([]), [429, 502, 503, 504]);
+  assert.deepEqual(normalizeFallbackStatuses("bad"), [429, 502, 503, 504]);
+  assert.deepEqual(normalizeFallbackStatuses([399, 600, "429", null]), [429, 502, 503, 504]);
+  assert.deepEqual(normalizeFallbackStatuses([418, 429, 418, 503]), [418, 429, 503]);
+  assert.deepEqual(normalizeFallbackStatuses([500]), [500]);
+});
+
+test("configurable retryable statuses are honoured; defaults change accordingly", () => {
+  const a = "cfg-status-custom";
+  const first = convertRequest(prioCtx(a, { fallbackStatuses: [418] }), prioReq(a));
+  assert.equal(first.body.model, "prio-high");
+  const hit = convertResponse({ state: first.state }, { status: 418, body: '{"error":{"message":"teapot"}}' });
+  assert.ok(hit.next, "418 must trigger fallback when configured");
+  assert.equal(hit.next.body.model, "prio-low");
+  const miss = convertResponse({ state: first.state }, { status: 429, body: '{"error":{"message":"limited"}}' });
+  assert.equal(miss.next, undefined, "429 must NOT trigger fallback once overridden");
+  assert.equal(miss.body.error.message, "limited");
+});
+
+test("default behaviour is unchanged when new options are absent", () => {
+  const a = "cfg-status-default";
+  const first = convertRequest(prioCtx(a), prioReq(a));
+  assert.deepEqual(first.state.fallbackStatuses, [429, 502, 503, 504]);
+  assert.equal(first.state.cooldownSeconds, 0);
+  assert.equal(first.state.fallbackTraceEnabled, false);
+  assert.equal(first.state.fallbackWebhookUrl, "");
+  assert.deepEqual(first.state.fallbackTrace, []);
+  for (const s of [429, 502, 503, 504]) {
+    assert.ok(convertResponse({ state: first.state }, { status: s, body: '{"error":{"message":"x"}}' }).next);
+  }
+  for (const s of [400, 401, 404, 500]) {
+    assert.equal(convertResponse({ state: first.state }, { status: s, body: '{"error":{"message":"x"}}' }).next, undefined);
+  }
+});
+
+test("invalid cooldownSeconds / status config degrades safely", () => {
+  const a = "cfg-invalid";
+  const first = convertRequest(prioCtx(a, { cooldownSeconds: 9999, fallbackStatuses: [1, 2, 3] }), prioReq(a));
+  assert.equal(first.state.cooldownSeconds, 0);
+  assert.deepEqual(first.state.fallbackStatuses, [429, 502, 503, 504]);
+  assert.equal(first.body.model, "prio-high");
+});
+
+test("best-effort cooldown skips a recently failed target, then recovers", () => {
+  const a = "cfg-cooldown-recover";
+  const config = { cooldownSeconds: 30 };
+  // T=1000: first request picks prio-high; a 429 marks it cooling and falls back.
+  const first = withClock(1000, () => convertRequest(prioCtx(a, config), prioReq(a)));
+  assert.equal(first.body.model, "prio-high");
+  const fall = withClock(1000, () => convertResponse({ state: first.state }, {
+    status: 429, body: '{"error":{"message":"limited"}}'
+  }));
+  assert.equal(fall.next.body.model, "prio-low");
+  // T=1005: a NEW request must avoid prio-high while cooling.
+  const second = withClock(1005, () => convertRequest(prioCtx(a, config), prioReq(a)));
+  assert.equal(second.body.model, "prio-low");
+  // T=1040: cooldown expired, prio-high is eligible again.
+  const third = withClock(1040, () => convertRequest(prioCtx(a, config), prioReq(a)));
+  assert.equal(third.body.model, "prio-high");
+});
+
+test("cooldown is disabled by default and cannot make an alias unavailable", () => {
+  const a = "cfg-cooldown-all";
+  const config = { cooldownSeconds: 60 };
+  // Mark both targets cooling via two chains, then ensure a request still resolves.
+  withClock(2000, () => {
+    const f1 = convertRequest(prioCtx(a, config), prioReq(a));
+    const r1 = convertResponse({ state: f1.state }, { status: 503, body: '{"error":{"message":"down"}}' });
+    const r2 = convertResponse({ state: r1.state }, { status: 503, body: '{"error":{"message":"down"}}' });
+    assert.equal(r2.next, undefined, "maxRetries caps the chain");
+  });
+  const next = withClock(2001, () => convertRequest(prioCtx(a, config), prioReq(a)));
+  assert.ok(next.body.model === "prio-high" || next.body.model === "prio-low",
+    "with all targets cooling, the router still returns a candidate");
+  // Without cooldown configured, no clock is consulted at all.
+  const plain = convertRequest(prioCtx("cfg-cooldown-off"), prioReq("cfg-cooldown-off"));
+  assert.equal(plain.state.cooldownSeconds, 0);
+});
+
+test("fallback trace accumulates in state and is exposed on terminal failure", () => {
+  const a = "cfg-trace";
+  const config = { fallbackTraceEnabled: true };
+  const first = convertRequest(prioCtx(a, config), prioReq(a));
+  const second = convertResponse({ state: first.state }, { status: 429, body: '{"error":{"message":"limited"}}' });
+  assert.equal(second.state.fallbackTrace.length, 1);
+  assert.equal(second.state.fallbackTrace[0].from, "prio-high");
+  assert.equal(second.state.fallbackTrace[0].to, "prio-low");
+  assert.equal(second.state.fallbackTrace[0].status, 429);
+  const last = convertResponse({ state: second.state }, { status: 503, body: '{"error":{"message":"down"}}' });
+  assert.equal(last.next, undefined);
+  assert.equal(last.body.error.message, "down");
+  assert.deepEqual(last.body.vmr_fallback.alias, a);
+  assert.deepEqual(last.body.vmr_fallback.attempted, ["prio-high", "prio-low"]);
+  assert.equal(last.body.vmr_fallback.events.length, 1);
+});
+
+test("trace also attaches when the upstream reply is non-JSON", () => {
+  const a = "cfg-trace-nonjson";
+  const first = convertRequest(prioCtx(a, { fallbackTraceEnabled: true }), prioReq(a));
+  const fall = convertResponse({ state: first.state }, { status: 429, body: "rate limited" });
+  assert.ok(fall.next);
+  const last = convertResponse({ state: fall.state }, { status: 503, body: "<html>down</html>" });
+  assert.equal(last.next, undefined);
+  assert.equal(last.error.status, 503);
+  assert.deepEqual(last.error.vmr_fallback.attempted, ["prio-high", "prio-low"]);
+  assert.equal(last.error.vmr_fallback.events.length, 1);
+});
+
+test("successful fallback keeps the native upstream body unmodified", () => {
+  const a = "cfg-trace-success";
+  const first = convertRequest(prioCtx(a, { fallbackTraceEnabled: true }), prioReq(a));
+  const fall = convertResponse({ state: first.state }, { status: 429, body: '{"error":{"message":"limited"}}' });
+  assert.ok(fall.next);
+  // A successful upstream reply after failover is handed back verbatim.
+  const ok = convertResponse({ state: fall.state }, { status: 200, body: '{"choices":[{"message":{"content":"ok"}}]}' });
+  assert.deepEqual(ok.body, { choices: [{ message: { content: "ok" } }] });
+  assert.equal(ok.body.vmr_fallback, undefined);
+});
+
+test("trace is off by default, so error responses are byte-compatible", () => {
+  const a = "cfg-trace-default";
+  const first = convertRequest(prioCtx(a), prioReq(a));
+  const last = convertResponse({ state: first.state }, { status: 500, body: '{"error":{"message":"boom"}}' });
+  assert.equal(last.body.error.vmr_fallback, undefined);
+  assert.deepEqual(last.body.error, { message: "boom" });
+});
+
+test("optional webhook emits a best-effort event and never throws", () => {
+  const a = "cfg-webhook";
+  const calls = [];
+  const saved = globalThis.utils;
+  globalThis.utils = {
+    unixNow: () => 3000,
+    fetch: (r) => { calls.push(r); return { status: 200, headers: {}, body: {} }; }
+  };
+  try {
+    const first = convertRequest(prioCtx(a, { fallbackWebhookUrl: "https://example.com/hook" }), prioReq(a));
+    const fall = convertResponse({ state: first.state }, { status: 429, body: '{"error":{"message":"limited"}}' });
+    assert.ok(fall.next);
+    assert.equal(calls.length, 1);
+    const sent = JSON.parse(calls[0].body);
+    assert.equal(sent.plugin, "virtual-model-router");
+    assert.equal(sent.event, "fallback");
+    assert.equal(sent.status, 429);
+    assert.equal(sent.alias, a);
+    assert.equal(calls[0].url, "https://example.com/hook");
+  } finally {
+    if (saved === undefined) delete globalThis.utils; else globalThis.utils = saved;
+  }
+});
+
+test("webhook without a host fetch capability degrades silently", () => {
+  const a = "cfg-webhook-no-fetch";
+  const saved = globalThis.utils;
+  delete globalThis.utils;
+  try {
+    const first = convertRequest(prioCtx(a, { fallbackWebhookUrl: "https://example.com/hook" }), prioReq(a));
+    const fall = convertResponse({ state: first.state }, { status: 429, body: '{"error":{"message":"limited"}}' });
+    assert.ok(fall.next, "fallback still works without webhook support");
+  } finally {
+    if (saved === undefined) delete globalThis.utils; else globalThis.utils = saved;
+  }
+});
+
+test("invalid webhook URL is ignored", () => {
+  const a = "cfg-webhook-badurl";
+  const calls = [];
+  const saved = globalThis.utils;
+  globalThis.utils = { unixNow: () => 4000, fetch: (r) => { calls.push(r); return { status: 200, headers: {}, body: {} }; } };
+  try {
+    const first = convertRequest(prioCtx(a, { fallbackWebhookUrl: "file:///etc/passwd" }), prioReq(a));
+    convertResponse({ state: first.state }, { status: 429, body: '{"error":{"message":"limited"}}' });
+    assert.equal(calls.length, 0);
+  } finally {
+    if (saved === undefined) delete globalThis.utils; else globalThis.utils = saved;
+  }
+});
+
+test("direct passthrough is unaffected by the new fallback options", () => {
+  const a = "cfg-direct";
+  const request = prioReq("real/model");
+  request.model = "real/model";
+  const first = convertRequest(prioCtx(a, { fallbackTraceEnabled: true, cooldownSeconds: 30 }), request);
+  assert.equal(first.state.direct, true);
+  assert.equal(first.state.maxRetries, 0);
+  const out = convertResponse({ state: first.state }, { status: 429, body: '{"error":{"message":"no quota"}}' });
+  assert.equal(out.next, undefined);
+  assert.equal(out.body.error.message, "no quota");
+  assert.equal(out.body.error.vmr_fallback, undefined);
 });

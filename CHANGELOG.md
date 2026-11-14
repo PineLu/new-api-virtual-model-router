@@ -1,12 +1,27 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.3.0
+version: 0.3.1
 locale: en
 translations:
   zh-CN: CHANGELOG.zh-CN.md
 ---
 # Changelog
+
+## [0.3.1]
+
+### Added
+
+- Configurable retryable upstream statuses via `fallbackStatuses` (default `429, 502, 503, 504`); invalid or empty values fall back to the defaults.
+- Optional best-effort in-process `cooldownSeconds` for a target that returned a retryable status; `0` (default) disables it.
+- Optional `fallbackTraceEnabled`: when a fallback chain ultimately fails, attach a `vmr_fallback` object (alias, attempted targets, per-hop events) to the error reply.
+- Optional `fallbackWebhookUrl`: best-effort POST of each fallback event through the host's `utils.fetch`; empty (default) disables it.
+- 14 new unit tests; all new options are opt-in, so v0.3.0 behaviour is unchanged when they are absent.
+
+### Migration
+
+- No pricing, billing or existing configuration changes are required. All four new options have backward-compatible defaults; existing channels keep their current behaviour without any edit.
+- `cooldownSeconds` and `fallbackWebhookUrl` are best-effort only: the cooldown table is in-process and is not shared across instances or restarts, and the webhook requires the host to expose `utils.fetch` and allow the target host. Neither is a correctness guarantee.
 
 ## [0.3.0]
 

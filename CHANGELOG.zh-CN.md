@@ -1,10 +1,25 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.3.0
+version: 0.3.1
 locale: zh-CN
 ---
 # Changelog
+
+## [0.3.1]
+
+### Added
+
+- 新增 `fallbackStatuses` 配置，可自定义触发回退的上游状态码（默认 `429, 502, 503, 504`）；配置非法或为空时回退到默认值。
+- 新增可选 `cooldownSeconds`：对返回可回退状态码的上游目标做进程内尽力而为的短期冷却，`0`（默认）表示关闭。
+- 新增可选 `fallbackTraceEnabled`：回退链最终失败时，在错误响应中附带 `vmr_fallback`（别名、已尝试目标、逐跳事件）。
+- 新增可选 `fallbackWebhookUrl`：通过宿主 `utils.fetch` 尽力而为地上报每次回退事件，留空（默认）即关闭。
+- 新增 14 项单元测试；所有新选项均为可选，缺省时 v0.3.0 行为完全不变。
+
+### Migration
+
+- 不涉及计费、价格或既有配置变更；四个新选项均提供向后兼容的默认值，现有渠道无需任何修改即可保持原行为。
+- `cooldownSeconds` 与 `fallbackWebhookUrl` 仅为尽力而为：冷却表位于进程内，不跨实例、不跨重启共享；webhook 依赖宿主提供 `utils.fetch` 并放行目标地址。两者都不构成正确性保证。
 
 ## [0.3.0]
 
