@@ -1,10 +1,23 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.3.1
+version: 0.3.2
 locale: zh-CN
 ---
 # Changelog
+
+## [0.3.2]
+
+### Fixed
+
+- `fallbackTraceEnabled`：轨迹改为追加到错误**消息**末尾（`... | vmr_fallback={...}`），不再作为同级 JSON 字段。rc.51 实机验证显示网关会按固定 error schema 重建非 2xx 响应，`body.vmr_fallback` 会被静默丢弃。成功回退仍不改动响应。
+- `fallbackWebhookUrl`：回退事件改为 **GET + 查询参数**。Plugin API v1 契约规定只有 login/refresh/revoke/exchangeKey/scheduled/ingress/egress/reply/report 这几类 hook 允许带 body 的 POST，因此 `convertResponse` 里原来的 POST 永远不会发出。现在每次调用结果（`{ok,status}` 或 `{ok:false,error}`）都会记录进轨迹，失败可观测而非静默。
+
+### Compatibility
+
+- 两个选项均为可选且默认关闭，现有渠道行为不变。
+- webhook 接收方需支持 GET + 查询参数，而不是 JSON POST body。宿主 SSRF 检查仍然生效，仅公网地址可用。
+- 需同时开启 `fallbackTraceEnabled` 才能看到 webhook 调用结果；否则响应不变。
 
 ## [0.3.1]
 

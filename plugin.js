@@ -6,7 +6,7 @@ export const meta = {
   apiVersion: 1,
   key: "virtual-model-router",
   name: { en: "Virtual Model Router", zh: "虚拟模型路由" },
-  version: "0.3.1",
+  version: "0.3.2",
   author: { name: "PineLu" },
   description: {
     en: "Route virtual model groups and pass through real models across Chat, Responses and Anthropic Messages using New API protocol converters.",
@@ -139,8 +139,8 @@ export const meta = {
         type: "boolean",
         title: { en: "Attach fallback trace on failure", zh: "失败时附带回退轨迹" },
         description: {
-          en: "When a fallback chain ultimately fails, attach a vmr_fallback object to the error response. Successful fallbacks stay native and are not modified.",
-          zh: "回退链最终失败时，在错误响应中附带 vmr_fallback 轨迹；成功回退仍为原生上游响应，不做修改。"
+          en: "When a fallback chain ultimately fails, append a vmr_fallback summary to the error message. Successful fallbacks stay native and are not modified.",
+          zh: "回退链最终失败时，在错误消息末尾追加 vmr_fallback 摘要；成功回退仍为原生上游响应，不做修改。"
         },
         default: false
       },
@@ -149,8 +149,8 @@ export const meta = {
         format: "url",
         title: { en: "Fallback event webhook (optional)", zh: "回退事件 webhook（可选）" },
         description: {
-          en: "Optional absolute http(s) URL for best-effort fallback event POSTs. Requires the host to expose utils.fetch and allow the host. Empty disables it.",
-          zh: "可选 http(s) 绝对地址，尽力而为地上报回退事件；依赖宿主提供 utils.fetch 并放行该地址，留空即关闭。"
+          en: "Optional absolute http(s) URL notified with a GET query on each fallback; provider hooks cannot send POST bodies. Best-effort and subject to host SSRF checks, so only public hosts work. Empty disables it.",
+          zh: "可选 http(s) 绝对地址，每次回退以 GET 查询参数通知；provider hook 不允许 POST 请求体。尽力而为且受宿主 SSRF 检查限制，仅公网地址可用。留空即关闭。"
         },
         default: ""
       }
@@ -162,6 +162,7 @@ const UPSTREAM_ENDPOINT = "/v1/chat/completions";
 const DEFAULT_FALLBACK_STATUSES = Object.freeze([429, 502, 503, 504]);
 const COOLDOWN_MAX_ENTRIES = 256;
 const TRACE_MAX_EVENTS = 8;
+const TRACE_MESSAGE_LIMIT = 4000;
 const isRecord = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const hasOwn = (v, key) => Object.prototype.hasOwnProperty.call(v, key);
 const integerInRange = (v, min, max, fallback) =>
@@ -243,34 +244,54 @@ function chooseWithCooldown(models, alias, excluded, now, seconds) {
   return alternative === null ? primary : alternative;
 }
 
-/** Optional best-effort fallback event POST. Requires the host to expose
- * utils.fetch and allow the target host; any failure is swallowed. */
+/** Best-effort fallback notification. Provider hooks cannot POST: the host
+ * only allows POST with a body in login/refresh/revoke/exchangeKey/scheduled/
+ * ingress/egress/reply/report. The event therefore rides as GET query
+ * parameters. SSRF checks still apply, so only public hosts work. Returns an
+ * observable outcome so the trace can show whether the hook fired. */
 function emitFallbackEvent(state, event) {
   const url = state.fallbackWebhookUrl;
-  if (typeof url !== "string" || !/^https?:\/\//.test(url)) return;
+  if (typeof url !== "string" || !/^https?:\/\//.test(url)) return null;
   try {
-    if (typeof utils === "undefined" || !utils || typeof utils.fetch !== "function") return;
-    utils.fetch({
-      url,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ plugin: "virtual-model-router", event: "fallback", ...event })
-    });
-  } catch {}
+    if (typeof utils === "undefined" || !utils || typeof utils.fetch !== "function")
+      return { ok: false, error: "utils.fetch unavailable" };
+    const fields = { plugin: "virtual-model-router", event: "fallback", ...event };
+    const query = Object.keys(fields)
+      .filter(k => fields[k] !== undefined && fields[k] !== null && fields[k] !== "")
+      .map(k => encodeURIComponent(k) + "=" + encodeURIComponent(String(fields[k])))
+      .join("&");
+    const res = utils.fetch({ url: url + (url.indexOf("?") === -1 ? "?" : "&") + query, method: "GET" });
+    return { ok: true, status: isRecord(res) ? res.status : undefined };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e).slice(0, 180) };
+  }
 }
 
 /** Attach the per-request trace only when the fallback chain ultimately fails.
- * Successful fallbacks keep the native upstream response untouched. */
+ * The gateway rebuilds non-2xx bodies from a fixed error schema, so a sibling
+ * JSON field (body.vmr_fallback) is dropped; the message string survives, so
+ * the trace rides at its end. Successful fallbacks keep the native response. */
 function attachTrace(reply, state) {
   if (!state.fallbackTraceEnabled
       || !Array.isArray(state.fallbackTrace) || !state.fallbackTrace.length) return reply;
-  const vmr_fallback = {
-    alias: state.alias, attempted: state.attempted, events: state.fallbackTrace
-  };
-  // A JSON upstream reply is handed back as { body }, a non-JSON one as a
-  // plugin-synthesized { error }. Attach to whichever shape actually exists.
-  if (isRecord(reply.body)) return { ...reply, body: { ...reply.body, vmr_fallback } };
-  if (isRecord(reply.error)) return { ...reply, error: { ...reply.error, vmr_fallback } };
+  let suffix;
+  try {
+    const payload = { alias: state.alias, attempted: state.attempted, events: state.fallbackTrace };
+    suffix = " | vmr_fallback=" + JSON.stringify(payload);
+    if (suffix.length > TRACE_MESSAGE_LIMIT) suffix = suffix.slice(0, TRACE_MESSAGE_LIMIT) + "…";
+  } catch { return reply; }
+  // JSON upstream error comes back as { body: { error } }, non-JSON as { error }.
+  if (isRecord(reply.body) && isRecord(reply.body.error)) {
+    const msg = String(reply.body.error.message ?? "");
+    return { ...reply, body: { ...reply.body, error: { ...reply.body.error, message: msg + suffix } } };
+  }
+  if (isRecord(reply.error)) {
+    const msg = String(reply.error.message ?? "");
+    return { ...reply, error: { ...reply.error, message: msg + suffix } };
+  }
+  if (isRecord(reply.body) && hasOwn(reply.body, "message")) {
+    return { ...reply, body: { ...reply.body, message: String(reply.body.message ?? "") + suffix } };
+  }
   return reply;
 }
 
@@ -431,8 +452,9 @@ export function convertResponse(ctx, response) {
       const trace = Array.isArray(state.fallbackTrace) ? state.fallbackTrace : [];
       const event = { alias: state.alias, from: failed, status: response.status, to: chosen.name };
       if (now) event.at = now;
+      const hook = emitFallbackEvent(state, event);
+      if (hook) event.webhook = hook;
       const events = trace.length < TRACE_MAX_EVENTS ? [...trace, event] : trace;
-      emitFallbackEvent(state, event);
       return {
         next: {
           path: UPSTREAM_ENDPOINT, body: { ...state.replayBody, model: chosen.name },

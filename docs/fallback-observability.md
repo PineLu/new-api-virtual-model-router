@@ -1,8 +1,8 @@
-# Fallback configuration and observability (v0.3.1)
+# Fallback configuration and observability (v0.3.1–v0.3.2)
 
-This document records what the three v0.3.1 additions actually deliver, and
-— more importantly — what the New API Plugin API v1 sandbox prevents them from
-delivering. Read it before treating any of them as a production guarantee.
+This document records what the v0.3.1 additions actually deliver, what live
+rc.51 testing found they could not deliver, and the v0.3.2 corrections. Read it
+before treating any of them as a production guarantee.
 
 ## What was missing in v0.3.0
 
@@ -16,8 +16,8 @@ delivering. Read it before treating any of them as a production guarantee.
 | --- | --- | --- | --- |
 | `fallbackStatuses` | integer array (400–599, unique) | `[429, 502, 503, 504]` | Pre-output upstream statuses that trigger fallback. Invalid, empty or non-array values fall back to the defaults, so a bad config can never silently disable fallback. |
 | `cooldownSeconds` | integer 0–600 | `0` (off) | Best-effort, in-process pause before reusing a target that returned a retryable status. |
-| `fallbackTraceEnabled` | boolean | `false` | When a fallback chain **ultimately fails**, attach `vmr_fallback` to the returned reply. |
-| `fallbackWebhookUrl` | absolute http(s) string | `""` (off) | Best-effort POST of each fallback event through the host `utils.fetch`. |
+| `fallbackTraceEnabled` | boolean | `false` | When a fallback chain **ultimately fails**, append `vmr_fallback` to the error message. |
+| `fallbackWebhookUrl` | absolute http(s) string | `""` (off) | Best-effort **GET** notification (query parameters) of each fallback event through the host `utils.fetch`. |
 
 All four are opt-in. With no new config, `convertRequest` / `convertResponse`
 behave exactly as in v0.3.0 (22 pre-existing unit tests pass unchanged).
@@ -53,15 +53,26 @@ distributed coordination; not a circuit breaker. New API's channel-level
 require host-side support (persistent plugin state), which is outside this
 repository.
 
-### 3. Fallback trace and events — partial by design
+### 3. Fallback trace and events — corrected in v0.3.2
+
+**Why v0.3.1 failed live, and what v0.3.2 changed.** Both channels passed their
+hook-level unit tests in v0.3.1 but did nothing on a live rc.51 gateway:
+
+- The v0.3.1 trace was a sibling JSON field (`body.vmr_fallback`). The gateway
+  rebuilds every non-2xx body from a fixed error schema, so that field was
+  dropped before the client saw it.
+- The v0.3.1 webhook used `POST` with a JSON body. The Plugin API v1 contract
+  allows POST with a body **only** in the `login`, `refresh`, `revoke`,
+  `exchangeKey`, `scheduled`, `ingress`, `egress`, `reply` and `report` hooks.
+  `convertResponse` is a provider hook, so the call never fired.
 
 Two channels are available:
 
-- **Per-request trace in `state.fallbackTrace`**: one entry per hop with `alias`, `from`, `status`, `to` and (when a clock exists) `at`. Bounded to 8 entries.
-- **Terminal failure**: when `fallbackTraceEnabled` is true and the chain does not recover, the returned reply carries `vmr_fallback: { alias, attempted, events }`. It is attached to whichever shape the plugin returns — `{ body }` for a JSON upstream reply, `{ error }` for a synthesized one. Successful replies are **never** modified.
-- **Optional webhook**: with `fallbackWebhookUrl` set and host `utils.fetch` available, each fallback event is POSTed as `{ plugin, event: "fallback", alias, from, status, to, at? }`. Invalid URLs are ignored and every failure is swallowed, so routing is never affected.
+- **Per-request trace in `state.fallbackTrace`**: one entry per hop with `alias`, `from`, `status`, `to`, `webhook` (the outcome of the notification attempt, when configured) and (when a clock exists) `at`. Bounded to 8 entries.
+- **Terminal failure**: when `fallbackTraceEnabled` is true and the chain does not recover, ` | vmr_fallback={alias,attempted,events}` is appended to the error **message** (bounded to 4000 characters). The message is the only error field the gateway preserves verbatim; extra JSON siblings are not. Successful replies are **never** modified.
+- **Optional webhook**: with `fallbackWebhookUrl` set and host `utils.fetch` available, each fallback event is sent as `GET {url}?plugin=virtual-model-router&event=fallback&alias=…&from=…&status=…&to=…&at=…`. Invalid URLs are ignored. Host SSRF checks still apply, so only public hosts work; a loopback or private address is refused.
 
-> **Webhook latency caveat**: `utils.fetch` is synchronous. A slow or unreachable endpoint can add up to the host's per-call timeout to *every* failover hop. Keep it off unless the endpoint is fast, local and trusted; a failure here is swallowed but the added latency is not.
+> **Webhook latency caveat**: `utils.fetch` is synchronous. A slow or unreachable endpoint can add up to the host's per-call timeout to *every* failover hop. Keep it off unless the endpoint is fast and trusted; a failure is recorded on the trace but the added latency is not removed.
 
 **Remaining hard limit**: a successful failover returns a 2xx upstream response
 through `nativeResponse: true`; `convertResponse` is not called again, so the
@@ -74,9 +85,10 @@ persists).
 
 ## Verification status
 
-- `npm test`: 36/36 pass (22 pre-existing + 14 new). `npm run check` passes.
-- Unit tests cover custom statuses, invalid-config degradation, cooldown hit and expiry, "all cooling" safety, trace on JSON and non-JSON terminal failures, successful-response immutability, webhook emission/degradation, and direct-passthrough isolation.
-- **Not yet done**: live rc.51 integration with these options enabled. The v0.3.1 features are validated at the hook level only; form rendering of the array field, `utils.unixNow()` availability, and `utils.fetch` host allowance must be confirmed against the exact New API build before production use.
+- `npm test`: 36/36 pass. `npm run check` passes.
+- Unit tests cover custom statuses, invalid-config degradation, cooldown hit and expiry, "all cooling" safety, trace on JSON and non-JSON terminal failures, successful-response immutability, webhook GET emission/degradation, and direct-passthrough isolation.
+- **Live rc.51 with v0.3.1**: `fallbackStatuses` and `cooldownSeconds` passed end to end — a custom `[418]` triggered three-protocol fallback (including streaming), `429` stopped triggering once overridden, and 4/4 post-failure requests skipped the cooled target. The channel form rendered all four fields correctly. `fallbackTraceEnabled` and `fallbackWebhookUrl` did not work — exactly the two failures this document records and v0.3.2 corrects.
+- **Still unverified for v0.3.2**: the corrected message trace and GET webhook have not been re-run on a live gateway from this repository. The webhook needs a public endpoint because host SSRF checks reject loopback and private addresses, so an isolated local mock cannot prove it. Verify both before a production rollout.
 
 ## Configuration example
 

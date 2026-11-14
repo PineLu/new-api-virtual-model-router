@@ -1,12 +1,25 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.3.1
+version: 0.3.2
 locale: en
 translations:
   zh-CN: CHANGELOG.zh-CN.md
 ---
 # Changelog
+
+## [0.3.2]
+
+### Fixed
+
+- `fallbackTraceEnabled`: the trace is now appended to the error **message** (`... | vmr_fallback={...}`) instead of a sibling JSON field. Live rc.51 testing showed the gateway rebuilds non-2xx bodies from a fixed error schema, so `body.vmr_fallback` was silently dropped. Successful failovers remain untouched.
+- `fallbackWebhookUrl`: the fallback event is now sent as a **GET with query parameters**. The Plugin API v1 contract allows POST with a body only in login/refresh/revoke/exchangeKey/scheduled/ingress/egress/reply/report hooks, so the previous POST from `convertResponse` could never fire. Every outcome (`{ok,status}` or `{ok:false,error}`) is recorded on the trace so a failure is observable instead of silent.
+
+### Compatibility
+
+- Both options are opt-in and default to off; existing channels keep their behaviour.
+- Webhook consumers must accept GET with query parameters instead of a JSON POST body. Host SSRF checks still apply, so only public hosts work.
+- The webhook outcome is visible only with `fallbackTraceEnabled`; without it the reply is unchanged.
 
 ## [0.3.1]
 

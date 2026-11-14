@@ -29,7 +29,7 @@ const req = (stream = false) => ({
 
 test("manifest exposes Chat, Anthropic Messages and Responses routes through Chat", () => {
   assert.equal(meta.apiVersion, 1);
-  assert.equal(meta.version, "0.3.1");
+  assert.equal(meta.version, "0.3.2");
   assert.deepEqual(meta.models, ["auto-code"]); // rc.51 channel picker expects a non-empty models array
   assert.deepEqual(meta.relay, [
     {
@@ -402,10 +402,13 @@ test("fallback trace accumulates in state and is exposed on terminal failure", (
   assert.equal(second.state.fallbackTrace[0].status, 429);
   const last = convertResponse({ state: second.state }, { status: 503, body: '{"error":{"message":"down"}}' });
   assert.equal(last.next, undefined);
-  assert.equal(last.body.error.message, "down");
-  assert.deepEqual(last.body.vmr_fallback.alias, a);
-  assert.deepEqual(last.body.vmr_fallback.attempted, ["prio-high", "prio-low"]);
-  assert.equal(last.body.vmr_fallback.events.length, 1);
+  // The gateway rebuilds non-2xx bodies from a fixed schema, so the trace rides
+  // at the end of the message string instead of a sibling JSON field.
+  assert.ok(last.body.error.message.startsWith("down | vmr_fallback="));
+  const payload = JSON.parse(last.body.error.message.slice(last.body.error.message.indexOf("vmr_fallback=") + "vmr_fallback=".length));
+  assert.equal(payload.alias, a);
+  assert.deepEqual(payload.attempted, ["prio-high", "prio-low"]);
+  assert.equal(payload.events.length, 1);
 });
 
 test("trace also attaches when the upstream reply is non-JSON", () => {
@@ -416,8 +419,9 @@ test("trace also attaches when the upstream reply is non-JSON", () => {
   const last = convertResponse({ state: fall.state }, { status: 503, body: "<html>down</html>" });
   assert.equal(last.next, undefined);
   assert.equal(last.error.status, 503);
-  assert.deepEqual(last.error.vmr_fallback.attempted, ["prio-high", "prio-low"]);
-  assert.equal(last.error.vmr_fallback.events.length, 1);
+  const payload = JSON.parse(last.error.message.slice(last.error.message.indexOf("vmr_fallback=") + "vmr_fallback=".length));
+  assert.deepEqual(payload.attempted, ["prio-high", "prio-low"]);
+  assert.equal(payload.events.length, 1);
 });
 
 test("successful fallback keeps the native upstream body unmodified", () => {
@@ -452,12 +456,18 @@ test("optional webhook emits a best-effort event and never throws", () => {
     const fall = convertResponse({ state: first.state }, { status: 429, body: '{"error":{"message":"limited"}}' });
     assert.ok(fall.next);
     assert.equal(calls.length, 1);
-    const sent = JSON.parse(calls[0].body);
-    assert.equal(sent.plugin, "virtual-model-router");
-    assert.equal(sent.event, "fallback");
-    assert.equal(sent.status, 429);
-    assert.equal(sent.alias, a);
-    assert.equal(calls[0].url, "https://example.com/hook");
+    // Provider hooks cannot POST; the event must be a GET with query params.
+    assert.equal(calls[0].method, "GET");
+    assert.equal(calls[0].body, undefined);
+    const u = new URL(calls[0].url);
+    assert.equal(u.origin + u.pathname, "https://example.com/hook");
+    assert.equal(u.searchParams.get("plugin"), "virtual-model-router");
+    assert.equal(u.searchParams.get("event"), "fallback");
+    assert.equal(u.searchParams.get("status"), "429");
+    assert.equal(u.searchParams.get("alias"), a);
+    // The hook outcome is observable on the accumulated trace.
+    assert.equal(fall.state.fallbackTrace[0].webhook.ok, true);
+    assert.equal(fall.state.fallbackTrace[0].webhook.status, 200);
   } finally {
     if (saved === undefined) delete globalThis.utils; else globalThis.utils = saved;
   }
