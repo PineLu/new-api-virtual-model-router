@@ -29,6 +29,7 @@ const req = (stream = false) => ({
 
 test("manifest exposes the Chat Completions provider route", () => {
   assert.equal(meta.apiVersion, 1);
+  assert.deepEqual(meta.models, []); // rc.51 channel picker requires non-null models array
   assert.equal(meta.relay.length, 1);
   assert.equal(meta.relay[0].converter, "plugin");
 });
