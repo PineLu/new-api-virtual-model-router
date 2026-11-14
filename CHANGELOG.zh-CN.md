@@ -1,10 +1,17 @@
 ---
 changelogVersion: 1
 plugin: virtual-model-router
-version: 0.2.0
+version: 0.2.1
 locale: zh-CN
 ---
 # Changelog
+
+## [0.2.1]
+
+### Added
+
+- 真实模型直通：不在虚拟模型组中的请求模型，直接透传至已被网关选中的渠道。
+- 真实模型调用失败不会切入无关虚拟模型组；保留原有优先级和权重路由。
 
 ## [0.2.0]
 
